@@ -1,0 +1,1616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>TruvanAI - AI Governance Dashboard</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --color-bg: #ffffff;
+      --color-surface: #f8f8f8;
+      --color-surface-raised: #ffffff;
+      --color-border: #e0e0e0;
+      --color-border-strong: #cccccc;
+      --color-text-primary: #111111;
+      --color-text-secondary: #555555;
+      --color-text-muted: #888888;
+      --color-pending: #b45309;
+      --color-pending-soft: #fff7e6;
+      --color-pending-border: #f0d29c;
+      --color-approved: #15803d;
+      --color-approved-soft: #edf9f1;
+      --color-approved-border: #b8e3c5;
+      --color-rejected: #b91c1c;
+      --color-rejected-soft: #fdf1f1;
+      --color-rejected-border: #efc2c2;
+      --color-blocked: #991b1b;
+      --color-unknown: #6b7280;
+      --color-approve: #15803d;
+      --color-approve-hover: #116b32;
+      --color-reject: #b91c1c;
+      --color-reject-hover: #991b1b;
+      --color-on-accent: #ffffff;
+      --color-focus: #2563eb;
+      --color-nav: rgba(255, 255, 255, 0.86);
+      --color-approved-pulse: rgba(21, 128, 61, 0.3);
+      --color-rejected-pulse: rgba(185, 28, 28, 0.22);
+      --color-backdrop: rgba(17, 17, 17, 0.1);
+      --color-spinner-track: rgba(255, 255, 255, 0.3);
+      --color-toast-border: #dedede;
+      --shadow-card: 0 1px 2px rgba(17, 17, 17, 0.04), 0 10px 28px rgba(17, 17, 17, 0.04);
+      --shadow-card-hover: 0 2px 4px rgba(17, 17, 17, 0.05), 0 16px 36px rgba(17, 17, 17, 0.07);
+      --shadow-toast: 0 12px 40px rgba(17, 17, 17, 0.16);
+      --radius-column: 16px;
+      --radius-card: 12px;
+      --radius-control: 8px;
+      --radius-pill: 999px;
+      --transition-fast: 160ms ease;
+      --transition-card: 240ms cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --color-bg: #0f0f0f;
+        --color-surface: #1a1a1a;
+        --color-surface-raised: #202020;
+        --color-border: #2a2a2a;
+        --color-border-strong: #3a3a3a;
+        --color-text-primary: #eeeeee;
+        --color-text-secondary: #a0a0a0;
+        --color-text-muted: #666666;
+        --color-pending: #fbbf24;
+        --color-pending-soft: #2a210f;
+        --color-pending-border: #5a4616;
+        --color-approved: #4ade80;
+        --color-approved-soft: #12251a;
+        --color-approved-border: #245b39;
+        --color-rejected: #f87171;
+        --color-rejected-soft: #2a1414;
+        --color-rejected-border: #6b2a2a;
+        --color-blocked: #fca5a5;
+        --color-unknown: #8b8b8b;
+        --color-approve: #166534;
+        --color-approve-hover: #15803d;
+        --color-reject: #991b1b;
+        --color-reject-hover: #b91c1c;
+        --color-focus: #93c5fd;
+        --color-nav: rgba(15, 15, 15, 0.86);
+        --color-approved-pulse: rgba(74, 222, 128, 0.3);
+        --color-rejected-pulse: rgba(248, 113, 113, 0.22);
+        --color-backdrop: rgba(0, 0, 0, 0.3);
+        --color-spinner-track: rgba(255, 255, 255, 0.25);
+        --color-toast-border: #333333;
+        --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.2);
+        --shadow-card-hover: 0 2px 4px rgba(0, 0, 0, 0.35), 0 16px 36px rgba(0, 0, 0, 0.28);
+        --shadow-toast: 0 12px 40px rgba(0, 0, 0, 0.5);
+      }
+    }
+
+    *,
+    *::before,
+    *::after {
+      box-sizing: border-box;
+    }
+
+    html {
+      min-height: 100%;
+      background: var(--color-bg);
+    }
+
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background: var(--color-bg);
+      color: var(--color-text-primary);
+      font-family: var(--font-sans);
+      font-size: 14px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    .navbar {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      border-bottom: 1px solid var(--color-border);
+      background: var(--color-nav);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+    }
+
+    .navbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+      width: 100%;
+      max-width: 1440px;
+      min-height: 68px;
+      margin: 0 auto;
+      padding: 0 28px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-width: 0;
+      color: var(--color-text-primary);
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      display: grid;
+      flex: none;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 9px;
+      background: var(--color-text-primary);
+      color: var(--color-bg);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-title {
+      overflow: hidden;
+      margin: 0;
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.015em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .nav-actions {
+      display: flex;
+      flex: none;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .pending-pill,
+    .live-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-raised);
+      color: var(--color-text-secondary);
+      font-size: 12px;
+      font-weight: 500;
+      line-height: 1;
+      white-space: nowrap;
+    }
+
+    .pending-pill {
+      padding: 7px 9px 7px 12px;
+    }
+
+    .pending-pill strong {
+      display: grid;
+      place-items: center;
+      min-width: 21px;
+      height: 21px;
+      padding: 0 5px;
+      border-radius: var(--radius-pill);
+      background: var(--color-pending-soft);
+      color: var(--color-pending);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .live-chip {
+      padding: 8px 11px;
+    }
+
+    .status-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--color-rejected);
+      transition: background var(--transition-fast);
+    }
+
+    .live-chip[data-state="online"] .status-dot {
+      background: var(--color-approved);
+      animation: status-pulse 2.4s ease-out infinite;
+    }
+
+    .live-chip[data-state="offline"] {
+      color: var(--color-text-muted);
+    }
+
+    @keyframes status-pulse {
+      0% {
+        box-shadow: 0 0 0 0 var(--color-approved-pulse);
+      }
+      65% {
+        box-shadow: 0 0 0 7px transparent;
+      }
+      100% {
+        box-shadow: 0 0 0 0 transparent;
+      }
+    }
+
+    .main {
+      width: 100%;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 36px 28px 48px;
+    }
+
+    .page-intro {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 24px;
+      margin-bottom: 26px;
+    }
+
+    .eyebrow {
+      margin: 0 0 7px;
+      color: var(--color-text-muted);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+    }
+
+    .page-intro h2,
+    .audit-header h2 {
+      margin: 0;
+      color: var(--color-text-primary);
+      font-size: 25px;
+      font-weight: 600;
+      letter-spacing: -0.035em;
+      line-height: 1.15;
+    }
+
+    .page-description {
+      margin: 8px 0 0;
+      color: var(--color-text-secondary);
+      font-size: 13px;
+    }
+
+    .last-updated {
+      flex: none;
+      margin: 0 0 3px;
+      color: var(--color-text-muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .board {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-items: start;
+      gap: 18px;
+    }
+
+    .board-column {
+      min-width: 0;
+      min-height: 356px;
+      padding: 14px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-column);
+      background: var(--color-surface);
+    }
+
+    .column-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .column-heading {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+    }
+
+    .column-heading h2 {
+      margin: 0;
+      font-size: 11px;
+      font-weight: 650;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .column-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--color-text-muted);
+    }
+
+    .column-pending .column-heading {
+      color: var(--color-pending);
+    }
+
+    .column-pending .column-dot {
+      background: var(--color-pending);
+    }
+
+    .column-approved .column-heading {
+      color: var(--color-approved);
+    }
+
+    .column-approved .column-dot {
+      background: var(--color-approved);
+    }
+
+    .column-rejected .column-heading {
+      color: var(--color-rejected);
+    }
+
+    .column-rejected .column-dot {
+      background: var(--color-rejected);
+    }
+
+    .column-count {
+      display: grid;
+      place-items: center;
+      min-width: 23px;
+      height: 23px;
+      padding: 0 6px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-pill);
+      background: var(--color-surface-raised);
+      color: var(--color-text-secondary);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .column-description {
+      margin: 5px 0 13px 15px;
+      color: var(--color-text-muted);
+      font-size: 11px;
+    }
+
+    .card-list {
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    .loan-card {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      overflow: hidden;
+      padding: 16px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-card);
+      background: var(--color-surface-raised);
+      box-shadow: var(--shadow-card);
+      transition:
+        opacity var(--transition-card),
+        transform var(--transition-card),
+        border-color var(--transition-fast),
+        box-shadow var(--transition-fast);
+    }
+
+    .loan-card::before {
+      position: absolute;
+      top: 0;
+      right: 0;
+      left: 0;
+      height: 2px;
+      background: var(--color-border);
+      content: "";
+    }
+
+    .loan-card[data-status="pending"]::before {
+      background: var(--color-pending);
+    }
+
+    .loan-card[data-status="approved"]::before {
+      background: var(--color-approved);
+    }
+
+    .loan-card[data-status="rejected"]::before {
+      background: var(--color-rejected);
+    }
+
+    .loan-card:hover {
+      border-color: var(--color-border-strong);
+      box-shadow: var(--shadow-card-hover);
+      transform: translateY(-1px);
+    }
+
+    .loan-card.is-entering {
+      opacity: 0;
+      transform: translateY(10px);
+    }
+
+    .loan-card.is-leaving {
+      opacity: 0;
+      transform: translateY(-7px) scale(0.985);
+    }
+
+    .card-topline {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 3px 8px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-pill);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.035em;
+      line-height: 1.35;
+      text-transform: uppercase;
+    }
+
+    .status-badge--pending {
+      border-color: var(--color-pending-border);
+      background: var(--color-pending-soft);
+      color: var(--color-pending);
+    }
+
+    .status-badge--approved {
+      border-color: var(--color-approved-border);
+      background: var(--color-approved-soft);
+      color: var(--color-approved);
+    }
+
+    .status-badge--rejected,
+    .status-badge--blocked {
+      border-color: var(--color-rejected-border);
+      background: var(--color-rejected-soft);
+      color: var(--color-rejected);
+    }
+
+    .status-badge--unknown {
+      border-color: var(--color-border);
+      background: var(--color-surface);
+      color: var(--color-unknown);
+    }
+
+    .card-time {
+      color: var(--color-text-muted);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .application-id {
+      overflow-wrap: anywhere;
+      margin: 0;
+      color: var(--color-text-primary);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      font-weight: 650;
+      letter-spacing: -0.01em;
+    }
+
+    .amount {
+      margin: -3px 0 0;
+      color: var(--color-text-primary);
+      font-size: 29px;
+      font-weight: 650;
+      font-variant-numeric: tabular-nums;
+      letter-spacing: -0.055em;
+      line-height: 1;
+    }
+
+    .card-details {
+      display: grid;
+      gap: 5px;
+      margin-top: -1px;
+    }
+
+    .detail-row {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 14px;
+      min-width: 0;
+      font-size: 11px;
+    }
+
+    .detail-label {
+      flex: none;
+      color: var(--color-text-muted);
+    }
+
+    .detail-value {
+      overflow: hidden;
+      color: var(--color-text-secondary);
+      text-align: right;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .card-actions {
+      display: flex;
+      gap: 8px;
+      padding-top: 2px;
+    }
+
+    .button {
+      display: inline-flex;
+      flex: 1;
+      align-items: center;
+      justify-content: center;
+      gap: 7px;
+      min-width: 0;
+      height: 37px;
+      padding: 0 12px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-control);
+      color: var(--color-on-accent);
+      font-size: 12px;
+      font-weight: 650;
+      cursor: pointer;
+      transition:
+        background var(--transition-fast),
+        border-color var(--transition-fast),
+        opacity var(--transition-fast),
+        transform var(--transition-fast);
+    }
+
+    .button:hover:not(:disabled) {
+      transform: translateY(-1px);
+    }
+
+    .button:active:not(:disabled) {
+      transform: translateY(0);
+    }
+
+    .button:focus-visible {
+      outline: 2px solid var(--color-focus);
+      outline-offset: 2px;
+    }
+
+    .button:disabled {
+      cursor: wait;
+      opacity: 0.7;
+    }
+
+    .button--approve {
+      background: var(--color-approve);
+    }
+
+    .button--approve:hover:not(:disabled) {
+      background: var(--color-approve-hover);
+    }
+
+    .button--reject {
+      background: var(--color-reject);
+    }
+
+    .button--reject:hover:not(:disabled) {
+      background: var(--color-reject-hover);
+    }
+
+    .button-spinner {
+      display: none;
+      width: 12px;
+      height: 12px;
+      border: 2px solid var(--color-spinner-track);
+      border-top-color: var(--color-on-accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+
+    .button.is-loading .button-spinner {
+      display: inline-block;
+    }
+
+    @keyframes spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+
+    .empty-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 208px;
+      padding: 24px 16px;
+      color: var(--color-text-muted);
+      text-align: center;
+    }
+
+    .empty-mark {
+      display: block;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 11px;
+      border: 1px dashed var(--color-border-strong);
+      border-radius: 50%;
+    }
+
+    .empty-state p {
+      margin: 0;
+      color: var(--color-text-secondary);
+      font-size: 12px;
+      font-weight: 550;
+    }
+
+    .empty-state span {
+      margin-top: 4px;
+      font-size: 11px;
+    }
+
+    .audit-panel {
+      margin-top: 26px;
+      padding: 20px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-column);
+      background: var(--color-surface);
+    }
+
+    .audit-header {
+      display: flex;
+      align-items: flex-end;
+      justify-content: space-between;
+      gap: 20px;
+      margin-bottom: 14px;
+    }
+
+    .audit-header h2 {
+      font-size: 18px;
+    }
+
+    .audit-limit {
+      flex: none;
+      margin-bottom: 2px;
+      color: var(--color-text-muted);
+      font-size: 11px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--color-border);
+      border-radius: 10px;
+      background: var(--color-surface-raised);
+    }
+
+    .audit-table {
+      width: 100%;
+      min-width: 700px;
+      border-collapse: collapse;
+      font-size: 12px;
+      text-align: left;
+    }
+
+    .audit-table th,
+    .audit-table td {
+      padding: 11px 14px;
+      vertical-align: middle;
+    }
+
+    .audit-table th {
+      border-bottom: 1px solid var(--color-border);
+      color: var(--color-text-muted);
+      font-size: 10px;
+      font-weight: 650;
+      letter-spacing: 0.065em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+
+    .audit-table tbody tr {
+      transition: background var(--transition-fast);
+    }
+
+    .audit-table tbody tr:hover {
+      background: var(--color-surface);
+    }
+
+    .audit-table tbody tr + tr td {
+      border-top: 1px solid var(--color-border);
+    }
+
+    .audit-table td {
+      color: var(--color-text-secondary);
+      white-space: nowrap;
+    }
+
+    .audit-time {
+      color: var(--color-text-muted);
+      font-family: var(--font-mono);
+      font-size: 10px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .audit-agent {
+      color: var(--color-text-primary);
+      font-weight: 550;
+    }
+
+    .audit-action {
+      font-family: var(--font-mono);
+      font-size: 11px;
+    }
+
+    .table-badge {
+      display: inline-flex;
+      padding: 3px 7px;
+      border: 1px solid transparent;
+      border-radius: var(--radius-pill);
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      line-height: 1.45;
+      text-transform: uppercase;
+    }
+
+    .table-badge--allowed {
+      border-color: var(--color-approved-border);
+      background: var(--color-approved-soft);
+      color: var(--color-approved);
+    }
+
+    .table-badge--pending {
+      border-color: var(--color-pending-border);
+      background: var(--color-pending-soft);
+      color: var(--color-pending);
+    }
+
+    .table-badge--blocked {
+      border-color: var(--color-rejected-border);
+      background: var(--color-rejected-soft);
+      color: var(--color-blocked);
+    }
+
+    .verdict {
+      font-weight: 650;
+      letter-spacing: 0.03em;
+    }
+
+    .verdict--yes {
+      color: var(--color-approved);
+    }
+
+    .verdict--no {
+      color: var(--color-rejected);
+    }
+
+    .verdict--unknown {
+      color: var(--color-unknown);
+    }
+
+    .table-empty {
+      padding: 28px 14px !important;
+      color: var(--color-text-muted) !important;
+      text-align: center;
+    }
+
+    .toast-region {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 8px;
+      max-width: min(380px, calc(100vw - 32px));
+      pointer-events: none;
+    }
+
+    .toast {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      width: max-content;
+      max-width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--color-toast-border);
+      border-left: 3px solid var(--color-text-muted);
+      border-radius: 10px;
+      background: var(--color-surface-raised);
+      box-shadow: var(--shadow-toast);
+      color: var(--color-text-primary);
+      font-size: 12px;
+      line-height: 1.45;
+      opacity: 0;
+      pointer-events: auto;
+      transform: translateY(8px);
+      transition:
+        opacity 200ms ease,
+        transform 200ms ease;
+    }
+
+    .toast.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast--success {
+      border-left-color: var(--color-approved);
+    }
+
+    .toast--rejected {
+      border-left-color: var(--color-rejected);
+    }
+
+    .toast--error {
+      border-left-color: var(--color-blocked);
+    }
+
+    .toast-dot {
+      flex: none;
+      width: 7px;
+      height: 7px;
+      margin-top: 5px;
+      border-radius: 50%;
+      background: var(--color-text-muted);
+    }
+
+    .toast--success .toast-dot {
+      background: var(--color-approved);
+    }
+
+    .toast--rejected .toast-dot,
+    .toast--error .toast-dot {
+      background: var(--color-rejected);
+    }
+
+    .page-footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      width: 100%;
+      max-width: 1440px;
+      margin: 0 auto;
+      padding: 0 28px 28px;
+      color: var(--color-text-muted);
+      font-size: 10px;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 960px) {
+      .board {
+        grid-template-columns: 1fr;
+      }
+
+      .board-column {
+        min-height: 220px;
+      }
+
+      .empty-state {
+        min-height: 128px;
+      }
+    }
+
+    @media (max-width: 680px) {
+      .navbar-inner {
+        min-height: 62px;
+        padding: 0 16px;
+      }
+
+      .brand {
+        gap: 9px;
+      }
+
+      .brand-mark {
+        width: 27px;
+        height: 27px;
+        border-radius: 8px;
+        font-size: 13px;
+      }
+
+      .brand-title {
+        font-size: 12px;
+        white-space: normal;
+        line-height: 1.25;
+      }
+
+      .main {
+        padding: 26px 16px 36px;
+      }
+
+      .page-intro {
+        display: block;
+      }
+
+      .page-intro h2 {
+        font-size: 22px;
+      }
+
+      .last-updated {
+        margin-top: 12px;
+      }
+
+      .audit-panel {
+        padding: 14px;
+      }
+
+      .audit-header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 6px;
+      }
+
+      .page-footer {
+        display: block;
+        padding: 0 16px 24px;
+      }
+    }
+
+    @media (max-width: 470px) {
+      .brand-title {
+        font-size: 11px;
+      }
+
+      .pending-pill {
+        padding: 6px 7px 6px 9px;
+      }
+
+      .live-chip {
+        padding: 7px 9px;
+      }
+
+      .toast-region {
+        right: 16px;
+        bottom: 16px;
+        left: 16px;
+        max-width: none;
+        align-items: stretch;
+      }
+
+      .toast {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
+  </style>
+</head>
+<body>
+<div class="app-shell">
+    <header class="navbar">
+      <div class="navbar-inner">
+        <a class="brand" href="/" aria-label="TruvanAI dashboard home">
+          <span class="brand-mark" aria-hidden="true">T</span>
+          <h1 class="brand-title">TruvanAI - AI Governance Dashboard</h1>
+        </a>
+        <div class="nav-actions">
+          <span class="pending-pill">
+            Pending
+            <strong id="navPendingCount">0</strong>
+          </span>
+          <span class="live-chip" id="liveChip" data-state="offline">
+            <span class="status-dot" aria-hidden="true"></span>
+            <span id="liveLabel" role="status" aria-live="polite">Connecting</span>
+          </span>
+        </div>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="page-intro">
+        <div>
+          <p class="eyebrow">Human in the loop</p>
+          <h2>Loan approval queue</h2>
+          <p class="page-description">Review high-value requests before a final decision is recorded.</p>
+        </div>
+        <p class="last-updated" id="lastUpdated">Waiting for live data</p>
+      </div>
+
+      <section class="board" aria-label="Loan approval status columns">
+        <section class="board-column column-pending" aria-labelledby="pendingHeading">
+          <div class="column-header">
+            <div class="column-heading">
+              <span class="column-dot" aria-hidden="true"></span>
+              <h2 id="pendingHeading">Pending</h2>
+            </div>
+            <span class="column-count" id="pendingCount" aria-label="Pending count">0</span>
+          </div>
+          <p class="column-description">Awaiting a human decision</p>
+          <div class="card-list" id="pendingList" aria-live="polite"></div>
+          <div class="empty-state" id="pendingEmpty">
+            <span class="empty-mark" aria-hidden="true"></span>
+            <p>No pending approvals</p>
+            <span>New requests appear here automatically.</span>
+          </div>
+        </section>
+
+        <section class="board-column column-approved" aria-labelledby="approvedHeading">
+          <div class="column-header">
+            <div class="column-heading">
+              <span class="column-dot" aria-hidden="true"></span>
+              <h2 id="approvedHeading">Approved</h2>
+            </div>
+            <span class="column-count" id="approvedCount" aria-label="Approved count">0</span>
+          </div>
+          <p class="column-description">Approved by a human reviewer</p>
+          <div class="card-list" id="approvedList" aria-live="polite"></div>
+          <div class="empty-state" id="approvedEmpty">
+            <span class="empty-mark" aria-hidden="true"></span>
+            <p>No approved loans</p>
+            <span>Resolved approvals will be listed here.</span>
+          </div>
+        </section>
+
+        <section class="board-column column-rejected" aria-labelledby="rejectedHeading">
+          <div class="column-header">
+            <div class="column-heading">
+              <span class="column-dot" aria-hidden="true"></span>
+              <h2 id="rejectedHeading">Rejected</h2>
+            </div>
+            <span class="column-count" id="rejectedCount" aria-label="Rejected count">0</span>
+          </div>
+          <p class="column-description">Declined by a human reviewer</p>
+          <div class="card-list" id="rejectedList" aria-live="polite"></div>
+          <div class="empty-state" id="rejectedEmpty">
+            <span class="empty-mark" aria-hidden="true"></span>
+            <p>No rejected loans</p>
+            <span>Declined requests will be listed here.</span>
+          </div>
+        </section>
+      </section>
+
+      <section class="audit-panel" aria-labelledby="auditHeading">
+        <div class="audit-header">
+          <div>
+            <p class="eyebrow">PostgreSQL audit trail</p>
+            <h2 id="auditHeading">Recent agent activity</h2>
+          </div>
+          <span class="audit-limit">Last 10 actions</span>
+        </div>
+        <div class="table-wrap">
+          <table class="audit-table">
+            <caption class="sr-only">Last ten actions from the agent audit log</caption>
+            <thead>
+              <tr>
+                <th scope="col">Timestamp</th>
+                <th scope="col">Agent</th>
+                <th scope="col">Action</th>
+                <th scope="col">Status</th>
+                <th scope="col">Verdict</th>
+              </tr>
+            </thead>
+            <tbody id="auditBody">
+              <tr>
+                <td class="table-empty" colspan="5">Loading audit entries</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <footer class="page-footer">
+      <span>TruvanAI governance prototype</span>
+      <span>Every decision is recorded in the audit trail</span>
+    </footer>
+  </div>
+
+  <div class="toast-region" id="toastRegion" aria-live="polite" aria-atomic="false"></div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const refs = {
+        pendingList: document.getElementById("pendingList"),
+        approvedList: document.getElementById("approvedList"),
+        rejectedList: document.getElementById("rejectedList"),
+        pendingEmpty: document.getElementById("pendingEmpty"),
+        approvedEmpty: document.getElementById("approvedEmpty"),
+        rejectedEmpty: document.getElementById("rejectedEmpty"),
+        pendingCount: document.getElementById("pendingCount"),
+        approvedCount: document.getElementById("approvedCount"),
+        rejectedCount: document.getElementById("rejectedCount"),
+        navPendingCount: document.getElementById("navPendingCount"),
+        auditBody: document.getElementById("auditBody"),
+        liveChip: document.getElementById("liveChip"),
+        liveLabel: document.getElementById("liveLabel"),
+        lastUpdated: document.getElementById("lastUpdated"),
+        toastRegion: document.getElementById("toastRegion")
+      };
+
+      const currencyFormatter = new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency: "USD",
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+      const cardTimeFormatter = new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+      const auditTimeFormatter = new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+      const updatedAtFormatter = new Intl.DateTimeFormat(undefined, {
+        hour: "numeric",
+        minute: "2-digit",
+        second: "2-digit"
+      });
+
+      const seenCards = new Set();
+      let socket = null;
+      let reconnectTimer = null;
+      let reconnectAttempt = 0;
+      let suppressRealtime = 0;
+      let actionInFlight = false;
+
+      function escapeHtml(value) {
+        const escapes = {
+          "&": "&amp;",
+          "<": "&lt;",
+          ">": "&gt;",
+          '"': "&quot;",
+          "'": "&#39;"
+        };
+        return String(value ?? "").replace(/[&<>"']/g, (character) => escapes[character]);
+      }
+
+      function titleCase(value) {
+        return String(value ?? "")
+          .replaceAll("_", " ")
+          .replace(/\b[a-z]/g, (letter) => letter.toUpperCase());
+      }
+
+      function formatAmount(value) {
+        const amount = Number(value);
+        if (!Number.isFinite(amount)) {
+          return "Unavailable";
+        }
+        return currencyFormatter.format(amount);
+      }
+
+      function formatCardTime(value) {
+        if (!value) {
+          return "Unknown";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return "Unknown";
+        }
+        return cardTimeFormatter.format(date);
+      }
+
+      function formatAuditTime(value) {
+        if (!value) {
+          return "Unknown";
+        }
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+          return "Unknown";
+        }
+        return auditTimeFormatter.format(date);
+      }
+
+      function timestampForSort(item, status) {
+        const raw = status === "pending" ? item.requested_at : (item.resolved_at || item.requested_at);
+        const timestamp = Date.parse(raw || "");
+        return Number.isNaN(timestamp) ? 0 : timestamp;
+      }
+
+      function sortByNewest(items, status) {
+        return [...items].sort((left, right) => timestampForSort(right, status) - timestampForSort(left, status));
+      }
+
+      function policyClass(status) {
+        if (status === "ALLOWED") {
+          return "table-badge--allowed";
+        }
+        if (status === "BLOCKED") {
+          return "table-badge--blocked";
+        }
+        return "table-badge--pending";
+      }
+
+      function verdictClass(verdict) {
+        if (verdict === "YES") {
+          return "verdict--yes";
+        }
+        if (verdict === "NO") {
+          return "verdict--no";
+        }
+        return "verdict--unknown";
+      }
+
+      function applicationIdOf(item) {
+        const value = item && item.application_id;
+        return typeof value === "string" && value.trim() ? value.trim() : "";
+      }
+
+      function buildCard(item, status) {
+        const applicationId = applicationIdOf(item);
+        const displayId = applicationId || "Unknown application";
+        const safeId = escapeHtml(displayId);
+        const statusLabel = titleCase(status);
+        const requestedAt = item.requested_at;
+        const resolvedAt = item.resolved_at;
+        const agentName = titleCase(item.agent_name || "loan_agent");
+        const cardKey = `${status}:${displayId}:${requestedAt || ""}:${resolvedAt || ""}`;
+        const isNew = !seenCards.has(cardKey);
+        seenCards.add(cardKey);
+
+        const resolvedRow = status === "pending" ? "" : `
+          <div class="detail-row">
+            <span class="detail-label">Resolved</span>
+            <span class="detail-value">${escapeHtml(formatCardTime(resolvedAt))}</span>
+          </div>`;
+
+        const actions = status === "pending" && applicationId ? `
+          <div class="card-actions">
+            <button
+              class="button button--approve"
+              type="button"
+              data-action="approve"
+              data-application-id="${safeId}"
+              aria-label="Approve application ${safeId}"
+            >
+              <span class="button-spinner" aria-hidden="true"></span>
+              <span>Approve</span>
+            </button>
+            <button
+              class="button button--reject"
+              type="button"
+              data-action="reject"
+              data-application-id="${safeId}"
+              aria-label="Reject application ${safeId}"
+            >
+              <span class="button-spinner" aria-hidden="true"></span>
+              <span>Reject</span>
+            </button>
+          </div>` : "";
+
+        return `
+          <article
+            class="loan-card${isNew ? " is-entering" : ""}"
+            data-status="${status}"
+            data-application-id="${safeId}"
+          >
+            <div class="card-topline">
+              <span class="status-badge status-badge--${status}">${escapeHtml(statusLabel)}</span>
+              <time class="card-time" datetime="${escapeHtml(requestedAt || "")}">${escapeHtml(formatCardTime(requestedAt))}</time>
+            </div>
+            <h3 class="application-id">${safeId}</h3>
+            <p class="amount">${escapeHtml(formatAmount(item.amount))}</p>
+            <div class="card-details">
+              <div class="detail-row">
+                <span class="detail-label">Requested</span>
+                <span class="detail-value">${escapeHtml(formatCardTime(requestedAt))}</span>
+              </div>
+              <div class="detail-row">
+                <span class="detail-label">Agent</span>
+                <span class="detail-value">${escapeHtml(agentName)}</span>
+              </div>${resolvedRow}
+            </div>
+            ${actions}
+          </article>`;
+      }
+
+      function renderColumn(items, status, listElement, emptyElement, countElement) {
+        const sortedItems = sortByNewest(items, status);
+        listElement.innerHTML = sortedItems.map((item) => buildCard(item, status)).join("");
+        emptyElement.hidden = sortedItems.length > 0;
+        countElement.textContent = String(sortedItems.length);
+
+        const enteringCards = listElement.querySelectorAll(".is-entering");
+        if (enteringCards.length > 0) {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+              enteringCards.forEach((card) => card.classList.remove("is-entering"));
+            });
+          });
+        }
+      }
+
+      function renderAudit(entries) {
+        if (!Array.isArray(entries) || entries.length === 0) {
+          refs.auditBody.innerHTML = `
+            <tr>
+              <td class="table-empty" colspan="5">No audit entries yet</td>
+            </tr>`;
+          return;
+        }
+
+        refs.auditBody.innerHTML = entries.map((entry) => {
+          const policyStatus = String(entry.policy_status || "PENDING").toUpperCase();
+          const verdict = String(entry.verdict_card || "UNKNOWN").toUpperCase();
+          return `
+            <tr>
+              <td><span class="audit-time">${escapeHtml(formatAuditTime(entry.timestamp))}</span></td>
+              <td><span class="audit-agent">${escapeHtml(titleCase(entry.agent_name || "unknown"))}</span></td>
+              <td><span class="audit-action">${escapeHtml(entry.action_name || "unknown")}</span></td>
+              <td><span class="table-badge ${policyClass(policyStatus)}">${escapeHtml(policyStatus)}</span></td>
+              <td><span class="verdict ${verdictClass(verdict)}">${escapeHtml(verdict)}</span></td>
+            </tr>`;
+        }).join("");
+      }
+
+      function applyState(nextState) {
+        const pending = Array.isArray(nextState.pending) ? nextState.pending : [];
+        const approved = Array.isArray(nextState.approved) ? nextState.approved : [];
+        const rejected = Array.isArray(nextState.rejected) ? nextState.rejected : [];
+        const audit = Array.isArray(nextState.audit) ? nextState.audit : [];
+
+        renderColumn(pending, "pending", refs.pendingList, refs.pendingEmpty, refs.pendingCount);
+        renderColumn(approved, "approved", refs.approvedList, refs.approvedEmpty, refs.approvedCount);
+        renderColumn(rejected, "rejected", refs.rejectedList, refs.rejectedEmpty, refs.rejectedCount);
+        renderAudit(audit);
+
+        refs.navPendingCount.textContent = String(pending.length);
+        refs.lastUpdated.textContent = `Updated ${updatedAtFormatter.format(new Date())}`;
+      }
+
+      function setLiveState(connected, fallbackLabel) {
+        refs.liveChip.dataset.state = connected ? "online" : "offline";
+        refs.liveLabel.textContent = connected ? "Live" : (fallbackLabel || "Disconnected");
+      }
+
+      function showToast(message, variant) {
+        const toast = document.createElement("div");
+        toast.className = `toast toast--${variant || "success"}`;
+        toast.setAttribute("role", "status");
+
+        const dot = document.createElement("span");
+        dot.className = "toast-dot";
+        dot.setAttribute("aria-hidden", "true");
+
+        const copy = document.createElement("span");
+        copy.textContent = message;
+
+        toast.append(dot, copy);
+        refs.toastRegion.append(toast);
+        requestAnimationFrame(() => toast.classList.add("is-visible"));
+
+        window.setTimeout(() => {
+          toast.classList.remove("is-visible");
+          window.setTimeout(() => toast.remove(), 240);
+        }, 3800);
+      }
+
+      async function responseError(response) {
+        try {
+          const body = await response.json();
+          if (body && typeof body.detail === "string") {
+            return body.detail;
+          }
+        } catch (error) {
+          // Fall back to the status text below when no JSON body is present.
+        }
+        return response.statusText || "Request failed";
+      }
+
+      async function loadState() {
+        const response = await fetch("/api/state", {
+          method: "GET",
+          headers: { Accept: "application/json" },
+          cache: "no-store",
+          credentials: "same-origin"
+        });
+
+        if (response.status === 401) {
+          throw new Error("Authentication required. Refresh the page to sign in.");
+        }
+        if (!response.ok) {
+          throw new Error(await responseError(response));
+        }
+
+        const state = await response.json();
+        if (!state || typeof state !== "object") {
+          throw new Error("The dashboard returned an invalid state.");
+        }
+        applyState(state);
+      }
+
+      function waitForAnimation(milliseconds) {
+        return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+      }
+
+      async function handleDecision(button) {
+        const action = button.dataset.action;
+        const applicationId = button.dataset.applicationId;
+        const card = button.closest(".loan-card");
+
+        if (actionInFlight || !card || !applicationId) {
+          return;
+        }
+        if (action !== "approve" && action !== "reject") {
+          return;
+        }
+
+        actionInFlight = true;
+        suppressRealtime += 1;
+
+        const cardButtons = Array.from(card.querySelectorAll("button"));
+        cardButtons.forEach((cardButton) => {
+          cardButton.disabled = true;
+        });
+        button.classList.add("is-loading");
+        button.setAttribute("aria-busy", "true");
+
+        try {
+          const response = await fetch(`/api/${action}/${encodeURIComponent(applicationId)}`, {
+            method: "POST",
+            headers: { Accept: "application/json" },
+            credentials: "same-origin"
+          });
+
+          if (response.status === 401) {
+            throw new Error("Authentication required. Refresh the page to sign in.");
+          }
+          if (!response.ok) {
+            throw new Error(await responseError(response));
+          }
+
+          const payload = await response.json();
+          const resolvedId = payload.application_id || applicationId;
+          const verb = action === "approve" ? "approved" : "rejected";
+
+          card.classList.add("is-leaving");
+          await waitForAnimation(240);
+
+          let refreshFailed = false;
+          try {
+            await loadState();
+          } catch (error) {
+            refreshFailed = true;
+          }
+
+          showToast(
+            `Application ${resolvedId} ${verb}.`,
+            action === "approve" ? "success" : "rejected"
+          );
+          if (refreshFailed) {
+            showToast(
+              "The decision was saved, but the dashboard refresh failed. It will retry automatically.",
+              "error"
+            );
+          }
+        } catch (error) {
+          card.classList.remove("is-leaving");
+          cardButtons.forEach((cardButton) => {
+            cardButton.disabled = false;
+          });
+          button.classList.remove("is-loading");
+          button.removeAttribute("aria-busy");
+          const message = error instanceof Error ? error.message : "The decision could not be saved.";
+          showToast(message, "error");
+        } finally {
+          suppressRealtime = Math.max(0, suppressRealtime - 1);
+          actionInFlight = false;
+        }
+      }
+
+      function scheduleReconnect() {
+        window.clearTimeout(reconnectTimer);
+        const delay = Math.min(1000 * (2 ** reconnectAttempt), 12000) + Math.floor(Math.random() * 250);
+        reconnectAttempt += 1;
+        reconnectTimer = window.setTimeout(connectWebSocket, delay);
+      }
+
+      function connectWebSocket() {
+        if (socket && (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN)) {
+          return;
+        }
+
+        setLiveState(false, "Connecting");
+        const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+        const nextSocket = new WebSocket(`${protocol}//${window.location.host}/ws`);
+        socket = nextSocket;
+
+        nextSocket.addEventListener("open", () => {
+          if (socket !== nextSocket) {
+            return;
+          }
+          reconnectAttempt = 0;
+          setLiveState(true);
+          loadState().catch(() => {
+            // The WebSocket state message will retry the visual refresh.
+          });
+        });
+
+        nextSocket.addEventListener("message", (event) => {
+          let message;
+          try {
+            message = JSON.parse(event.data);
+          } catch (error) {
+            return;
+          }
+          if (message && message.type === "state" && message.data && suppressRealtime === 0) {
+            applyState(message.data);
+          }
+        });
+
+        nextSocket.addEventListener("close", () => {
+          if (socket !== nextSocket) {
+            return;
+          }
+          socket = null;
+          setLiveState(false, "Disconnected");
+          scheduleReconnect();
+        });
+
+        nextSocket.addEventListener("error", () => {
+          if (nextSocket.readyState === WebSocket.OPEN || nextSocket.readyState === WebSocket.CONNECTING) {
+            nextSocket.close();
+          }
+        });
+      }
+
+      function initializeDashboard() {
+        document.addEventListener("click", (event) => {
+          const button = event.target.closest("button[data-action]");
+          if (!button) {
+            return;
+          }
+          handleDecision(button);
+        });
+
+        loadState().catch((error) => {
+          const message = error instanceof Error ? error.message : "Dashboard data could not be loaded.";
+          showToast(message, "error");
+        });
+        connectWebSocket();
+      }
+
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initializeDashboard, { once: true });
+      } else {
+        initializeDashboard();
+      }
+
+    })();
+  </script>
+
+
+</body>
+</html>
