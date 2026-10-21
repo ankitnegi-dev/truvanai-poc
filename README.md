@@ -1,8 +1,8 @@
-# TruvanAI — AI Governance POC
+# TruvanAI - AI Governance POC
 
 > A working proof of concept for policy-governed AI agents: every decision is logged, high-value actions wait for a human, and policy violations are blocked and reported.
 
-**Status:** Work in progress — built in reviewable commit stages.
+**Status:** Work in progress - built in reviewable commit stages.
 
 ## What this project demonstrates
 
@@ -111,7 +111,7 @@ Violations are blocked immediately, written to the audit trail with a `BLOCKED` 
 
 ## Screenshots
 
-_Placeholder — screenshots will be added after the full demo is running._
+_Placeholder - screenshots will be added after the full demo is running._
 
 | View | Preview |
 | --- | --- |
