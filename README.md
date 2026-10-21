@@ -51,7 +51,7 @@ TruvanAI explores a practical control plane for agentic systems:
 ## Stack
 
 - Python 3.12
-- LangGraph and the Groq API (`llama-3.3-70b-versatile`)
+- LangGraph and the Groq API (primary: `openai/gpt-oss-120b`, fallback: `openai/gpt-oss-20b`)
 - FastAPI with WebSockets for the HITL dashboard
 - PostgreSQL for the append-only audit trail
 - Redis for the pending-approval queue
