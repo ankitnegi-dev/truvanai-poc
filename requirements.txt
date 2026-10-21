@@ -1,0 +1,9 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+langgraph>=0.2.60,<0.4
+groq>=0.13,<1.0
+python-dotenv>=1.0,<2.0
+psycopg[binary,pool]>=3.2,<4.0
+redis>=5.2,<6.0
+jinja2>=3.1,<4.0
+websockets>=13,<16
