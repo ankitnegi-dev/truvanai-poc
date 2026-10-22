@@ -21,6 +21,6 @@ services:
       - key: GMAIL_RECIPIENT
         sync: false
       - key: HITL_PASSWORD
-        value: truvanai2024
+        sync: false
       - key: SIMULATE_VIOLATION
         value: true

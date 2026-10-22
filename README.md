@@ -15,55 +15,36 @@ This repository is a hiring assessment for TruvanAI, an AI governance platform. 
 ## The three agents
 
 ### Agent 1 - Loan Approval Agent
+Evaluates loan requests and routes them by amount.
 
-The Loan Approval Agent evaluates a loan request, checks the amount against the policy threshold, and either approves a low-value loan automatically or queues a high-value loan for a human decision. It uses a deterministic LangGraph flow so the same amount always reaches the same policy branch. Groq is configured against `GROQ_MODEL` with the fallback model for tool-calling use cases, while the approval decision remains rule-based.
+| Tool | What it does | Verdict |
+|---|---|---|
+| check_loan_amount | Validates amount against $1,000 threshold | ALLOWED / YES |
+| auto_approve_loan | Approves loans at or below threshold | ALLOWED / YES |
+| request_human_approval | Queues high-value loans for human review | PENDING / UNKNOWN |
 
-**Tools it has**
-
-- `check_loan_amount(application_id, amount)`: validates the request, compares the amount with the `$1,000` threshold, and writes an `ALLOWED / YES` audit entry.
-- `auto_approve_loan(application_id)`: approves an application at or below the threshold and writes an `ALLOWED / YES` entry.
-- `request_human_approval(application_id, amount)`: pushes a pending request to the Redis queue and writes a `PENDING / UNKNOWN` entry.
-
-**Normal flow**
-
-`START` -> `loan_checker` -> amount router -> `auto_approver` -> `END` for applications at or below `$1,000`. The automatic approval is written to PostgreSQL, and the orchestrator then runs the monitor.
-
-**HITL flow**
-
-`START` -> `loan_checker` -> amount router -> `hitl_requester` -> Redis -> FastAPI dashboard -> human approve or reject -> audit -> `END` for applications above `$1,000`. The dashboard records `approve_loan` as `ALLOWED / YES` or `reject_loan` as `BLOCKED / NO`. The human decision is a separate audited action by `hitl_dashboard`.
+Flow: amount <= 1000 -> auto approve. amount > 1000 -> HITL queue -> human decision.
 
 ### Agent 2 - Restricted Data Agent
+Reads approved account data only. Cannot access sensitive fields.
 
-The Restricted Data Agent reads only the approved overdue accounts file and asks Groq for a short summary. Its tools have explicit boundaries, so a sensitive field request is denied even when the agent asks for it. The graph can take the normal summary path or the policy violation path based on `SIMULATE_VIOLATION`.
+| Tool | What it does | Verdict |
+|---|---|---|
+| read_overdue_accounts | Reads overdue_accounts/accounts.txt only | ALLOWED / YES |
+| summarize_accounts | Groq summary of approved records | ALLOWED / YES |
+| access_sensitive_data | Always denied - policy boundary | BLOCKED / NO |
 
-**Tools it has**
-
-- `read_overdue_accounts()`: reads only `data/overdue_accounts/accounts.txt` and writes an `ALLOWED / YES` audit entry.
-- `summarize_accounts(raw_data)`: sends the approved records to the primary Groq model with the fallback model and writes an `ALLOWED / YES` entry.
-- `access_sensitive_data(field)`: always returns an access denial and writes a `BLOCKED / NO` entry for the attempted field.
-
-**Normal flow**
-
-`START` -> `data_reader` -> `summarizer` -> Groq summary -> audit `ALLOWED` -> `END`. The orchestrator then runs the monitor. No sensitive field is read, requested, or returned.
-
-**Violation flow**
-
-`START` -> `data_reader` -> `violation_node` -> `access_sensitive_data` -> audit `BLOCKED / NO` -> monitor scan -> `block_agent_action` -> Gmail alert -> `END`. The tool denies the access at the boundary, and the monitor independently records the violation and alerts the operator.
+Flow: normal -> read -> summarize. violation -> read -> blocked access -> monitor -> Gmail alert.
 
 ### Agent 3 - Monitor Agent
+Runs after every agent action. Enforces two hardcoded policy rules.
 
-The Monitor Agent reviews the audit trail after agent work and enforces the two hardcoded policy rules. It examines the 10 newest audit rows, and `run_monitor(agent_name="data_agent")` can limit the scan to one agent. Policy decisions are deterministic. ChatGroq is configured through `GROQ_MODEL`, but the model has no authority over blocking.
+| Policy Rule | Triggers when | Action taken |
+|---|---|---|
+| large_loan_no_human_approval | loan_agent auto-approves amount > 1000 | block + Gmail alert |
+| sensitive_data_access | data_agent calls access_sensitive_data | block + Gmail alert |
 
-Before blocking, the monitor checks the audit trail for an existing `block_agent_action` entry for the same action id. Actions that were already handled are skipped, so later monitor runs do not block the same row again or send a duplicate Gmail alert.
-
-**Policy rules it enforces**
-
-1. `large_loan_no_human_approval`: triggers for a `loan_agent` action named `auto_approve_loan` when any recent action for the same `application_id` records an `amount` greater than `1000`.
-2. `sensitive_data_access`: triggers for a `data_agent` action named `access_sensitive_data`.
-
-**What happens on a violation**
-
-The monitor calls `block_agent_action(agent_id, action_id)`, which changes the original audit row to `BLOCKED / NO` and appends a new `monitor_agent` audit entry with `policy_status=ALLOWED` and `verdict_card=YES`. It then calls `send_gmail_alert` with the full violation details. The final state records the violation, the blocked action id, the alert confirmation, and `monitoring_complete=True`.
+Flow: scan audit log -> check rules -> violation found -> block action -> send Gmail -> log verdict.
 
 ## Architecture
 
@@ -176,7 +157,7 @@ GMAIL_APP_PASSWORD=xxxx xxxx xxxx xxxx
 # Create App Password at myaccount.google.com/apppasswords
 GMAIL_RECIPIENT=your_gmail@gmail.com
 
-HITL_PASSWORD=truvanai2024
+HITL_PASSWORD=your_password_here
 # Change this before production deployment
 
 SIMULATE_VIOLATION=true
@@ -193,7 +174,7 @@ SIMULATE_VIOLATION=true
 | `GMAIL_SENDER` | Gmail account used to send violation alerts. |
 | `GMAIL_APP_PASSWORD` | Sixteen-character Google App Password. This is not the normal Gmail account password. |
 | `GMAIL_RECIPIENT` | Address that receives policy violation alerts. It can be the same as the sender for the demo. |
-| `HITL_PASSWORD` | Password for the dashboard and its decision endpoints. Replace the demo value before production. |
+| `HITL_PASSWORD` | Password for the dashboard and its decision endpoints. Set a strong value in your environment. |
 | `SIMULATE_VIOLATION` | Set to `true` to run the data agent through the blocked sensitive-data path, or `false` for the normal summary path. The tools still use real services in both modes. |
 
 Never commit `.env`. It is ignored by git, and it contains live credentials.
@@ -273,17 +254,11 @@ The local values in `.env.example` already point to these ports. Stop the servic
    python main.py
    ```
 
-8. Open [http://localhost:8000](http://localhost:8000) and sign in with `HITL_PASSWORD`. The demo password is `truvanai2024`.
-
-Start the dashboard before the orchestrator so the large loan request can appear in the live queue. The orchestrator initializes the database, runs the small loan, large loan, and data agent scenarios, calls the monitor after each agent path, and waits two seconds between the loan scenarios.
+8. Open [http://localhost:8000](http://localhost:8000) and sign in with the password set via HITL_PASSWORD in your environment.
 
 ## Cloud deployment (Render)
 
-The repository includes `render.yaml` for a Render web service. Render installs `requirements.txt`, runs `python scripts/init_db.py` during the build, and starts the FastAPI dashboard with the provided start command. The `Procfile` contains the same web process definition for platforms that use it.
-
-The dashboard exposes an unauthenticated `/health` endpoint that returns `{"status": "ok"}`, and `render.yaml` configures `healthCheckPath: /health` so Render can check the service without dashboard credentials.
-
-Set the `sync: false` values in the Render dashboard: `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, and `GMAIL_RECIPIENT`. Paste the External Database URL and External Redis URL from Render into `DATABASE_URL` and `REDIS_URL`; the local Docker Compose ports are not used in the cloud. The YAML sets `GROQ_MODEL`, `HITL_PASSWORD`, and `SIMULATE_VIOLATION`; change the demo password before exposing the service publicly. Render provides the `PORT` value used by the start command.
+The repository includes `render.yaml`. Set `DATABASE_URL` (internal URL), `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, `GMAIL_RECIPIENT`, and `HITL_PASSWORD` in the Render dashboard. The build command runs `python scripts/init_db.py` automatically.
 
 ## Commit history
 
