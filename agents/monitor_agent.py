@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from langchain_core.tools import tool
 from langchain_groq import ChatGroq
 from langgraph.graph import END, START, StateGraph
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from shared.db import (
     AgentAuditLog,
@@ -245,6 +245,30 @@ async def action_fetcher(state: AgentState) -> dict[str, Any]:
     return {"recent_actions": actions}
 
 
+async def _previously_blocked_action_ids(
+    action_ids: set[int],
+) -> set[int]:
+    """Return action ids that already have a monitor block audit entry."""
+    if not action_ids:
+        return set()
+
+    blocked_action_id = AgentAuditLog.parameters[
+        "blocked_action_id"
+    ].as_integer()
+    statement = select(blocked_action_id).where(
+        AgentAuditLog.agent_name == AGENT_NAME,
+        AgentAuditLog.action_name == "block_agent_action",
+        blocked_action_id.in_(sorted(action_ids)),
+    )
+    async with get_db_connection() as session:
+        rows = (await session.scalars(statement)).all()
+    return {
+        int(value)
+        for value in rows
+        if value is not None
+    }
+
+
 async def policy_checker(state: AgentState) -> dict[str, Any]:
     """Check every recent action against both hardcoded policy rules."""
     violations: list[dict[str, Any]] = []
@@ -258,6 +282,16 @@ async def policy_checker(state: AgentState) -> dict[str, Any]:
         sensitive_data_violation = _sensitive_data_violation(action)
         if sensitive_data_violation is not None:
             violations.append(sensitive_data_violation)
+
+    if violations:
+        handled_action_ids = await _previously_blocked_action_ids(
+            {violation["action_id"] for violation in violations}
+        )
+        violations = [
+            violation
+            for violation in violations
+            if violation["action_id"] not in handled_action_ids
+        ]
 
     return {"violations_found": violations}
 

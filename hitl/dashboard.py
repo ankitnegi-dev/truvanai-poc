@@ -414,6 +414,12 @@ app = FastAPI(
 )
 
 
+@app.get("/health", include_in_schema=False)
+async def health() -> dict[str, str]:
+    """Return a lightweight liveness response for deployment health checks."""
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard(
     request: Request,

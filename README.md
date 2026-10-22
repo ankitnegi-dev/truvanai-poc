@@ -54,6 +54,8 @@ The Restricted Data Agent reads only the approved overdue accounts file and asks
 
 The Monitor Agent reviews the audit trail after agent work and enforces the two hardcoded policy rules. It examines the 10 newest audit rows, and `run_monitor(agent_name="data_agent")` can limit the scan to one agent. Policy decisions are deterministic. ChatGroq is configured through `GROQ_MODEL`, but the model has no authority over blocking.
 
+Before blocking, the monitor checks the audit trail for an existing `block_agent_action` entry for the same action id. Actions that were already handled are skipped, so later monitor runs do not block the same row again or send a duplicate Gmail alert.
+
 **Policy rules it enforces**
 
 1. `large_loan_no_human_approval`: triggers for a `loan_agent` action named `auto_approve_loan` when any recent action for the same `application_id` records an `amount` greater than `1000`.
@@ -279,6 +281,8 @@ Start the dashboard before the orchestrator so the large loan request can appear
 
 The repository includes `render.yaml` for a Render web service. Render installs `requirements.txt`, runs `python scripts/init_db.py` during the build, and starts the FastAPI dashboard with the provided start command. The `Procfile` contains the same web process definition for platforms that use it.
 
+The dashboard exposes an unauthenticated `/health` endpoint that returns `{"status": "ok"}`, and `render.yaml` configures `healthCheckPath: /health` so Render can check the service without dashboard credentials.
+
 Set the `sync: false` values in the Render dashboard: `DATABASE_URL`, `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, and `GMAIL_RECIPIENT`. Paste the External Database URL and External Redis URL from Render into `DATABASE_URL` and `REDIS_URL`; the local Docker Compose ports are not used in the cloud. The YAML sets `GROQ_MODEL`, `HITL_PASSWORD`, and `SIMULATE_VIOLATION`; change the demo password before exposing the service publicly. Render provides the `PORT` value used by the start command.
 
 ## Commit history
@@ -296,6 +300,7 @@ The project was built in deliberate commit stages so the governance layers can b
 | 7 | `feat: monitor agent with policy ruleset and violation detection` | Audit scan, two hardcoded policy rules, block tool, and Gmail alert workflow. |
 | 8 | `feat: end-to-end orchestrator and Render deployment` | Three-scenario orchestrator, error isolation, local Docker Compose infrastructure, Procfile, and Render service configuration. |
 | 9 | `docs: final README with architecture diagrams and setup guide` | Complete project documentation, Mermaid diagrams, local setup, deployment notes, and placeholder screenshots. |
+| 10 | `fix: prevent duplicate monitor alerts and add health check` | Audit-based deduplication for already handled violations and an unauthenticated `/health` endpoint wired to the Render health check. |
 
 ## Diagrams
 
