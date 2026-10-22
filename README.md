@@ -409,3 +409,23 @@ flowchart LR
 
 ### Gmail Policy Violation Alert
 ![Gmail alert](docs/screenshots/06_gmail_alert.png)
+
+---
+
+## Author
+
+**Ankit Negi** |
+B.Tech + M.Tech Computer Science, IIITDM Kancheepuram (2024-2029)
+
+Built as a hiring assessment for TruvanAI - an AI governance
+platform that monitors, audits, and controls AI agent behavior.
+
+- GitHub: [ankitnegi-dev](https://github.com/ankitnegi-dev)
+- Email: ank12it11@gmail.com
+- LinkedIn: [ankit-negi-2aa98232a](https://linkedin.com/in/ankit-negi-2aa98232a)
+- Portfolio: [ankit-negi.is-a.dev](https://ankit-negi.is-a.dev/)
+
+---
+
+*Every agent action in this system is recorded. Every decision
+has a verdict. That is the point.*
