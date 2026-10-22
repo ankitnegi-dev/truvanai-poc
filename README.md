@@ -392,18 +392,20 @@ flowchart LR
 
 ## Screenshots
 
-### HITL Dashboard
+### HITL Dashboard - Pending Approval
+![Pending approval queue](docs/screenshots/01_pending.png)
 
-[screenshot to be added]
+### HITL Dashboard - Loan Approved
+![Loan approved](docs/screenshots/02_approved.png)
 
-### Loan approval flow
+### HITL Dashboard - Loan Rejected
+![Loan rejected](docs/screenshots/03_rejected.png)
 
-[screenshot to be added]
+### PostgreSQL Audit Trail with Verdict Cards
+![Audit log](docs/screenshots/04_audit_log.png)
 
-### Policy violation and Gmail alert
+### Terminal - All 3 Scenarios Running
+![Terminal output](docs/screenshots/05_terminal.png)
 
-[screenshot to be added]
-
-### Audit log
-
-[screenshot to be added]
+### Gmail Policy Violation Alert
+![Gmail alert](docs/screenshots/06_gmail_alert.png)
