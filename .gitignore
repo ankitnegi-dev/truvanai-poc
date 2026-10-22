@@ -32,6 +32,9 @@ htmlcov/
 logs/
 *.pid
 
+# Private build notes
+notes/
+
 # Editors and operating systems
 .idea/
 .vscode/
