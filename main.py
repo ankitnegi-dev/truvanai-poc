@@ -8,6 +8,7 @@ does not stop the remaining demonstration paths.
 from __future__ import annotations
 
 import asyncio
+import json
 import math
 import os
 import warnings
@@ -32,6 +33,17 @@ from agents.loan_agent import (  # noqa: E402
 )
 from agents.monitor_agent import run_monitor  # noqa: E402
 from scripts.init_db import initialize_database as init_db  # noqa: E402
+from shared.loan_store import (  # noqa: E402
+    LoanRequestDenied,
+    delete_loan_application,
+    issue_loan_request,
+)
+from shared.policy import (  # noqa: E402
+    HITL_APPROVED_QUEUE,
+    HITL_QUEUE,
+    HITL_REJECTED_QUEUE,
+)
+from tools.loan_tools import check_loan_amount, get_redis_client  # noqa: E402
 
 RESULT_SEPARATOR = "-" * 60
 SCENARIO_SEPARATOR = "=" * 60
@@ -128,6 +140,12 @@ def _print_loan_result(result: Mapping[str, Any]) -> None:
     )
     _print_field("Status", status, LOAN_LABEL_WIDTH)
     _print_field("HITL needed", human_required, LOAN_LABEL_WIDTH)
+    if status == "BLOCKED":
+        _print_field(
+            "Gate reason",
+            str(result.get("blocked_reason", "blocked")),
+            LOAN_LABEL_WIDTH,
+        )
     _print_steps(
         _audit_entries(result),
         LOAN_LABEL_WIDTH,
@@ -194,6 +212,75 @@ def _print_scenario_header(number: int, title: str) -> None:
     print(SCENARIO_SEPARATOR)
 
 
+async def _remove_demo_queue_items(application_id: str) -> None:
+    """Remove stale demo entries before issuing a fresh trusted request."""
+    client = get_redis_client()
+    for queue_name in (
+        HITL_QUEUE,
+        HITL_APPROVED_QUEUE,
+        HITL_REJECTED_QUEUE,
+    ):
+        raw_items = await client.lrange(queue_name, 0, -1)
+        for raw_item in raw_items:
+            try:
+                item = json.loads(raw_item)
+            except json.JSONDecodeError:
+                continue
+            if (
+                isinstance(item, dict)
+                and item.get("application_id") == application_id
+            ):
+                await client.lrem(queue_name, 1, raw_item)
+
+
+async def _seed_demo_loan_request(
+    application_id: str,
+    amount: float,
+) -> str:
+    """Model trusted intake and return only the opaque request token."""
+    try:
+        await _remove_demo_queue_items(application_id)
+    except Exception:
+        print(
+            f"Warning: stale queue entries for {application_id} "
+            "could not be cleared."
+        )
+
+    await delete_loan_application(application_id)
+    issued = await issue_loan_request(
+        application_id=application_id,
+        customer_id=f"CUST-{application_id}",
+        amount=amount,
+    )
+    return issued.request_token
+
+
+async def _demonstrate_gate_tamper(
+    application_id: str,
+    request_token: str,
+    claimed_amount: float,
+) -> None:
+    """Show that a tampered amount is blocked before it reaches HITL."""
+    try:
+        await check_loan_amount.ainvoke(
+            {
+                "application_id": application_id,
+                "request_token": request_token,
+                "amount": claimed_amount,
+            }
+        )
+    except LoanRequestDenied as exc:
+        reason = exc.decision.reason or "blocked"
+        print(
+            "Preflight gate blocked tampered amount claim for "
+            f"{application_id} ({reason})"
+        )
+        return
+    raise RuntimeError(
+        "Preflight gate failed to block a tampered amount claim."
+    )
+
+
 async def main() -> None:
     """Run database setup and all three governance scenarios in order."""
     try:
@@ -204,9 +291,10 @@ async def main() -> None:
 
     try:
         _print_scenario_header(1, "Auto-approval loan under 1000")
+        token = await _seed_demo_loan_request("APP001", 500.0)
         result = await run_loan_agent(
             application_id="APP001",
-            amount=500,
+            request_token=token,
         )
         pretty_print_result(result)
         await run_monitor()
@@ -217,9 +305,11 @@ async def main() -> None:
 
     try:
         _print_scenario_header(2, "Large loan requiring HITL approval")
+        token = await _seed_demo_loan_request("APP002", 5000.0)
+        await _demonstrate_gate_tamper("APP002", token, 500.0)
         result = await run_loan_agent(
             application_id="APP002",
-            amount=5000,
+            request_token=token,
         )
         pretty_print_result(result)
         await run_monitor()

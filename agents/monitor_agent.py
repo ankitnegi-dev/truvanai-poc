@@ -27,6 +27,7 @@ from shared.db import (
     get_recent_actions,
     log_action,
 )
+from shared.policy import AUTO_APPROVE_ACTION, HUMAN_APPROVAL_THRESHOLD
 from tools.notify import send_gmail_alert
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +36,6 @@ load_dotenv(PROJECT_ROOT / ".env")
 AGENT_NAME = "monitor_agent"
 LARGE_LOAN_RULE = "large_loan_no_human_approval"
 SENSITIVE_DATA_RULE = "sensitive_data_access"
-HUMAN_APPROVAL_THRESHOLD = 1000.0
 
 model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 fallback_model = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
@@ -179,7 +179,7 @@ def _large_loan_violation(
     """Apply the large loan auto approval rule to one audit action."""
     if action.get("agent_name") != "loan_agent":
         return None
-    if action.get("action_name") != "auto_approve_loan":
+    if action.get("action_name") != AUTO_APPROVE_ACTION:
         return None
 
     original_parameters = _parameters_dict(action)

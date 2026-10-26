@@ -1,31 +1,48 @@
 """Real service tools used by the loan approval agent.
 
-Each tool writes its action to PostgreSQL through the async audit helper.
-Human approval requests are persisted in the Redis queue consumed by the
-FastAPI HITL dashboard. No in-memory fallback is provided.
+Every tool calls the preflight gate in ``shared.loan_store`` before it changes
+a loan record or touches the Redis HITL queue. The amount used for a decision
+comes from PostgreSQL, not from the agent. Each action and denial is written to
+the permanent audit trail.
 """
 
 from __future__ import annotations
 
 import json
-import math
+import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from dotenv import load_dotenv
 from langchain_core.tools import tool
 from redis.asyncio import Redis
 
 from shared.db import log_action
+from shared.loan_store import (
+    LoanAuthorization,
+    LoanRequestDenied,
+    authorize_loan_action,
+    consume_loan_request,
+    record_denial,
+    rollback_loan_transition,
+)
+from shared.policy import (
+    AUTO_APPROVE_ACTION,
+    AUTO_APPROVED,
+    CHECK_LOAN_ACTION,
+    HITL_QUEUE,
+    HUMAN_APPROVAL_THRESHOLD,
+    PENDING_HITL,
+    REQUEST_HITL_ACTION,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
 AGENT_NAME = "loan_agent"
-HITL_QUEUE = "hitl:loan_approvals"
-HUMAN_APPROVAL_THRESHOLD = 1000.0
+logger = logging.getLogger("truvanai.loan_tools")
 
 _redis_client: Redis | None = None
 
@@ -57,65 +74,94 @@ async def close_redis_connection() -> None:
         _redis_client = None
 
 
-def _validated_application_id(application_id: str) -> str:
-    """Validate and normalize an application identifier."""
-    if not isinstance(application_id, str) or not application_id.strip():
-        raise ValueError("application_id must be a non-empty string.")
-    return application_id.strip()
+async def _restore_after_side_effect_failure(
+    application_id: str,
+    request_token: str,
+    expected_status: str,
+) -> None:
+    """Best-effort status restoration after a failed queue or audit write."""
+    try:
+        restored = await rollback_loan_transition(
+            application_id,
+            request_token,
+            expected_status,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to restore application %s after a side effect failure.",
+            application_id,
+        )
+        return
+    if not restored:
+        logger.error(
+            "Application %s was not restored from %s to SUBMITTED.",
+            application_id,
+            expected_status,
+        )
 
 
-def _validated_amount(amount: float) -> float:
-    """Validate a loan amount and return it as a finite float."""
-    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
-        raise TypeError("amount must be a number.")
-    value = float(amount)
-    if not math.isfinite(value):
-        raise ValueError("amount must be finite.")
-    if value < 0:
-        raise ValueError("amount cannot be negative.")
-    return value
-
-
-def _human_approval_required(amount: float) -> bool:
-    """Apply the loan policy threshold to an amount."""
-    return amount > HUMAN_APPROVAL_THRESHOLD
+async def _raise_denial(decision: LoanAuthorization) -> NoReturn:
+    """Record a denied action and raise the typed denial exception."""
+    if decision.allowed:
+        raise RuntimeError("A denied action received an allowed decision.")
+    await record_denial(decision, agent_name=AGENT_NAME)
+    raise LoanRequestDenied(decision)
 
 
 @tool
 async def check_loan_amount(
     application_id: str,
-    amount: float,
+    request_token: str,
+    amount: float | None = None,
 ) -> dict[str, Any]:
-    """Check a loan amount and flag whether human approval is required."""
-    clean_application_id = _validated_application_id(application_id)
-    clean_amount = _validated_amount(amount)
-    human_required = _human_approval_required(clean_amount)
+    """Check a loan against the trusted application record.
+
+    The trusted amount is loaded from PostgreSQL. If an amount is supplied, it
+    is only compared with the stored amount and is never used for the decision.
+    """
+    decision = await authorize_loan_action(
+        application_id,
+        request_token,
+        CHECK_LOAN_ACTION,
+        claimed_amount=amount,
+    )
+    if not decision.allowed:
+        await _raise_denial(decision)
+
+    if decision.amount is None:
+        raise RuntimeError("Authorized loan is missing its trusted amount.")
+
+    clean_application_id = decision.application_id
+    trusted_amount = decision.amount
+    human_required = trusted_amount > HUMAN_APPROVAL_THRESHOLD
 
     if human_required:
         message = (
             f"Application {clean_application_id} requires human approval "
-            f"for {clean_amount:.2f}."
+            f"for {trusted_amount:.2f}."
         )
         result = (
-            f"Checked amount {clean_amount:.2f} for application "
+            f"Checked trusted amount {trusted_amount:.2f} for application "
             f"{clean_application_id}. Human approval is required."
         )
     else:
         message = (
             f"Application {clean_application_id} is within the automatic "
-            f"approval limit for {clean_amount:.2f}."
+            f"approval limit for {trusted_amount:.2f}."
         )
         result = (
-            f"Checked amount {clean_amount:.2f} for application "
+            f"Checked trusted amount {trusted_amount:.2f} for application "
             f"{clean_application_id}. Automatic approval is allowed."
         )
 
     await log_action(
         agent_name=AGENT_NAME,
-        action_name="check_loan_amount",
+        action_name=CHECK_LOAN_ACTION,
         parameters={
             "application_id": clean_application_id,
-            "amount": clean_amount,
+            "amount": trusted_amount,
+            "amount_source": "loan_applications",
+            "human_required": human_required,
         },
         result=result,
         policy_status="ALLOWED",
@@ -124,63 +170,148 @@ async def check_loan_amount(
 
     return {
         "application_id": clean_application_id,
-        "amount": clean_amount,
+        "amount": trusted_amount,
         "human_required": human_required,
         "message": message,
     }
 
 
 @tool
-async def auto_approve_loan(application_id: str) -> str:
-    """Mark a loan application as automatically approved."""
-    clean_application_id = _validated_application_id(application_id)
+async def auto_approve_loan(application_id: str, request_token: str) -> str:
+    """Approve a verified loan at or below the automatic approval limit."""
+    decision, applied = await consume_loan_request(
+        application_id,
+        request_token,
+        AUTO_APPROVE_ACTION,
+    )
+    if not applied:
+        if decision.allowed:
+            raise RuntimeError(
+                "The loan state changed without a denial decision."
+            )
+        await _raise_denial(decision)
+
+    clean_application_id = decision.application_id
+    trusted_amount = decision.amount
+    if trusted_amount is None:
+        await _restore_after_side_effect_failure(
+            clean_application_id,
+            request_token,
+            AUTO_APPROVED,
+        )
+        raise RuntimeError("Authorized loan is missing its trusted amount.")
+
     confirmation = (
         f"Loan application {clean_application_id} has been approved."
     )
 
-    await log_action(
-        agent_name=AGENT_NAME,
-        action_name="auto_approve_loan",
-        parameters={"application_id": clean_application_id},
-        result=confirmation,
-        policy_status="ALLOWED",
-        verdict_card="YES",
-    )
+    try:
+        await log_action(
+            agent_name=AGENT_NAME,
+            action_name=AUTO_APPROVE_ACTION,
+            parameters={
+                "application_id": clean_application_id,
+                "amount": trusted_amount,
+                "amount_source": "loan_applications",
+                "status": AUTO_APPROVED,
+            },
+            result=confirmation,
+            policy_status="ALLOWED",
+            verdict_card="YES",
+        )
+    except Exception:
+        await _restore_after_side_effect_failure(
+            clean_application_id,
+            request_token,
+            AUTO_APPROVED,
+        )
+        raise
+
     return confirmation
 
 
 @tool
-async def request_human_approval(application_id: str, amount: float) -> str:
-    """Queue a loan application for human approval through Redis."""
-    clean_application_id = _validated_application_id(application_id)
-    clean_amount = _validated_amount(amount)
-    requested_at = datetime.now(timezone.utc).isoformat()
+async def request_human_approval(
+    application_id: str,
+    request_token: str,
+) -> str:
+    """Queue a verified high-value loan for human approval through Redis."""
+    decision, applied = await consume_loan_request(
+        application_id,
+        request_token,
+        REQUEST_HITL_ACTION,
+    )
+    if not applied:
+        if decision.allowed:
+            raise RuntimeError(
+                "The loan state changed without a denial decision."
+            )
+        await _raise_denial(decision)
 
+    clean_application_id = decision.application_id
+    trusted_amount = decision.amount
+    if trusted_amount is None:
+        await _restore_after_side_effect_failure(
+            clean_application_id,
+            request_token,
+            PENDING_HITL,
+        )
+        raise RuntimeError("Authorized loan is missing its trusted amount.")
+
+    requested_at = datetime.now(timezone.utc).isoformat()
     payload = {
         "application_id": clean_application_id,
-        "amount": clean_amount,
+        "customer_id": decision.customer_id,
+        "amount": trusted_amount,
+        "amount_source": "loan_applications",
         "status": "pending",
         "requested_at": requested_at,
     }
+    raw_payload = json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
-    client = get_redis_client()
-    await client.rpush(HITL_QUEUE, json.dumps(payload))
+    try:
+        client = get_redis_client()
+        await client.rpush(HITL_QUEUE, raw_payload)
+    except Exception:
+        await _restore_after_side_effect_failure(
+            clean_application_id,
+            request_token,
+            PENDING_HITL,
+        )
+        raise
 
     confirmation = (
-        f"Loan application {clean_application_id} for {clean_amount:.2f} "
+        f"Loan application {clean_application_id} for {trusted_amount:.2f} "
         "has been queued for human approval."
     )
-    await log_action(
-        agent_name=AGENT_NAME,
-        action_name="request_human_approval",
-        parameters={
-            "application_id": clean_application_id,
-            "amount": clean_amount,
-            "queue": HITL_QUEUE,
-            "requested_at": requested_at,
-        },
-        result=confirmation,
-        policy_status="PENDING",
-        verdict_card="UNKNOWN",
-    )
+    try:
+        await log_action(
+            agent_name=AGENT_NAME,
+            action_name=REQUEST_HITL_ACTION,
+            parameters={
+                "application_id": clean_application_id,
+                "amount": trusted_amount,
+                "amount_source": "loan_applications",
+                "queue": HITL_QUEUE,
+                "requested_at": requested_at,
+            },
+            result=confirmation,
+            policy_status="PENDING",
+            verdict_card="UNKNOWN",
+        )
+    except Exception:
+        try:
+            await client.lrem(HITL_QUEUE, 1, raw_payload)
+        except Exception:
+            logger.exception(
+                "Failed to remove application %s from the HITL queue.",
+                clean_application_id,
+            )
+        await _restore_after_side_effect_failure(
+            clean_application_id,
+            request_token,
+            PENDING_HITL,
+        )
+        raise
+
     return confirmation

@@ -36,14 +36,24 @@ from fastapi.templating import Jinja2Templates
 from redis.asyncio import Redis
 
 from shared.db import get_recent_actions, log_action
+from shared.loan_store import (
+    get_loan_application,
+    resolve_hitl_loan,
+    restore_hitl_loan,
+)
+from shared.policy import (
+    HITL_APPROVED_QUEUE,
+    HITL_QUEUE,
+    HITL_REJECTED_QUEUE,
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BASE_DIR.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
-PENDING_QUEUE = "hitl:loan_approvals"
-APPROVED_QUEUE = "hitl:loan_approvals:approved"
-REJECTED_QUEUE = "hitl:loan_approvals:rejected"
+PENDING_QUEUE = HITL_QUEUE
+APPROVED_QUEUE = HITL_APPROVED_QUEUE
+REJECTED_QUEUE = HITL_REJECTED_QUEUE
 SESSION_COOKIE = "truvanai_hitl_session"
 SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 WATCH_INTERVAL_SECONDS = 1.0
@@ -246,11 +256,28 @@ return nil
 """
 
 
+async def _restore_pending_item(
+    client: Redis,
+    target_queue: str,
+    resolved_raw: str,
+    item: dict[str, Any],
+) -> None:
+    """Return a resolved queue item to the pending queue after a failure."""
+    restored_item = dict(item)
+    restored_item["status"] = "pending"
+    restored_item.pop("resolved_at", None)
+    await client.lrem(target_queue, 1, resolved_raw)
+    await client.rpush(
+        PENDING_QUEUE,
+        json.dumps(restored_item, separators=(",", ":")),
+    )
+
+
 async def _resolve_application(
     application_id: str,
     decision: str,
 ) -> dict[str, Any]:
-    """Move a pending application to a resolved queue and audit the decision."""
+    """Move a pending application, update trusted state, and audit the decision."""
     if decision == "approve":
         target_queue = APPROVED_QUEUE
         resolved_status = "approved"
@@ -303,21 +330,61 @@ async def _resolve_application(
             detail="The resolved queue item is invalid.",
         )
 
+    loan_status_updated = False
+    try:
+        loan_status_updated = await resolve_hitl_loan(
+            clean_application_id,
+            decision,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Failed to update the trusted loan record for %s.",
+            clean_application_id,
+        )
+        try:
+            await _restore_pending_item(
+                client,
+                target_queue,
+                resolved_raw,
+                item,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to restore application %s to the pending queue.",
+                clean_application_id,
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="The trusted loan record could not be updated.",
+        ) from exc
+
     confirmation = (
         f"Human operator {resolved_status} loan application "
         f"{clean_application_id}."
     )
     try:
+        trusted_record = await get_loan_application(clean_application_id)
+        trusted_amount = (
+            trusted_record["amount"]
+            if trusted_record is not None
+            else item.get("amount")
+        )
         await log_action(
             agent_name="hitl_dashboard",
             action_name=action_name,
             parameters={
                 "application_id": clean_application_id,
-                "amount": item.get("amount"),
+                "amount": trusted_amount,
+                "amount_source": (
+                    "loan_applications"
+                    if trusted_record is not None
+                    else "hitl_queue"
+                ),
                 "decision": decision,
                 "source_queue": PENDING_QUEUE,
                 "target_queue": target_queue,
                 "requested_at": item.get("requested_at"),
+                "trusted_loan_updated": loan_status_updated,
             },
             result=confirmation,
             policy_status=policy_status,
@@ -328,14 +395,25 @@ async def _resolve_application(
             "Failed to write human decision to the audit trail for %s.",
             clean_application_id,
         )
+        if loan_status_updated:
+            try:
+                restored = await restore_hitl_loan(clean_application_id)
+                if not restored:
+                    logger.error(
+                        "Trusted loan record for %s was not restored.",
+                        clean_application_id,
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to restore the trusted loan record for %s.",
+                    clean_application_id,
+                )
         try:
-            restored_item = dict(item)
-            restored_item["status"] = "pending"
-            restored_item.pop("resolved_at", None)
-            await client.lrem(target_queue, 1, resolved_raw)
-            await client.rpush(
-                PENDING_QUEUE,
-                json.dumps(restored_item, separators=(",", ":")),
+            await _restore_pending_item(
+                client,
+                target_queue,
+                resolved_raw,
+                item,
             )
         except Exception:
             logger.exception(

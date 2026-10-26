@@ -7,6 +7,7 @@ This repository is a hiring assessment for TruvanAI, an AI governance platform. 
 ## What it demonstrates
 
 - **HITL review:** agents cannot act on high-stakes decisions without human approval.
+- **Preflight gate:** loan requests are verified against trusted PostgreSQL state before any approval or HITL side effect.
 - **Policy enforcement:** the monitor agent detects and blocks violations.
 - **Audit trail:** every agent action is logged permanently with a verdict card of `YES`, `NO`, or `UNKNOWN`.
 - **Real infrastructure:** PostgreSQL, Redis, Groq API, and Gmail SMTP are used directly.
@@ -19,11 +20,13 @@ Evaluates loan requests and routes them by amount.
 
 | Tool | What it does | Verdict |
 |---|---|---|
-| check_loan_amount | Validates amount against $1,000 threshold | ALLOWED / YES |
-| auto_approve_loan | Approves loans at or below threshold | ALLOWED / YES |
-| request_human_approval | Queues high-value loans for human review | PENDING / UNKNOWN |
+| check_loan_amount | Verifies request token and loads amount from PostgreSQL | ALLOWED / YES |
+| auto_approve_loan | Approves verified loans at or below threshold | ALLOWED / YES |
+| request_human_approval | Queues verified high-value loans for human review | PENDING / UNKNOWN |
 
-Flow: amount <= 1000 -> auto approve. amount > 1000 -> HITL queue -> human decision.
+Flow: preflight gate -> trusted amount -> amount <= 1000 -> auto approve. amount > 1000 -> HITL queue -> human decision. denied -> BLOCKED / NO.
+
+Before any loan tool runs, a preflight gate verifies the opaque request token against `loan_applications`, loads the amount from PostgreSQL, rejects expired or replayed tokens, risk flags, and invalid state transitions, and writes `BLOCKED / NO`. A denied request never reaches auto-approval or the Redis queue. Scenario 2 also attempts a tampered amount claim, which the gate blocks before the queue.
 
 ### Agent 2 - Restricted Data Agent
 Reads approved account data only. Cannot access sensitive fields.
@@ -51,6 +54,7 @@ Flow: scan audit log -> check rules -> violation found -> block action -> send G
 ```text
 main.py (orchestrator)
     |
+    |--> Loan Agent --> preflight gate (token + trusted amount)
     |--> Loan Agent --> check amount --> auto approve (<=1000)
     |                              --> HITL queue (>1000)
     |                                      |
@@ -69,7 +73,7 @@ main.py (orchestrator)
                     verdict_card: YES / NO / UNKNOWN
 ```
 
-The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same rows that the agents and dashboard write, so the audit trail is both the source of truth and the evidence used for enforcement.
+The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same rows that the agents and dashboard write, so the audit trail is both the source of truth and the evidence used for enforcement. The trusted loan table is `loan_applications`; it stores amounts, state, token hashes, and risk flags.
 
 ## Tech stack
 
@@ -80,6 +84,7 @@ The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same r
 | HITL dashboard | FastAPI, Jinja2, WebSockets | Human review of pending loans with live state updates |
 | Dashboard auth | HTTP Basic auth plus signed session cookie | Protect the dashboard and decision endpoints with `HITL_PASSWORD` |
 | Audit trail | PostgreSQL, SQLAlchemy async, asyncpg | Permanent agent action records and verdict cards |
+| Trusted loan state | PostgreSQL `loan_applications` | Source of truth for amounts, status, token hashes, and risk flags |
 | Pending queue | Redis | Store requests waiting for a human decision |
 | Local infrastructure | Docker Compose, PostgreSQL 16 with pgvector, Redis 7 | Reproducible local services on ports `5433` and `6380` |
 | Alert delivery | Gmail SMTP with App Password | Send real violation email outside the dashboard |
@@ -107,7 +112,9 @@ truvanai-poc/
 ├── scripts/
 │   └── init_db.py
 ├── shared/
-│   └── db.py
+│   ├── db.py
+│   ├── loan_store.py
+│   └── policy.py
 ├── tools/
 │   ├── data_tools.py
 │   ├── loan_tools.py
@@ -236,7 +243,7 @@ The local values in `.env.example` already point to these ports. Stop the servic
    cp .env.example .env
    ```
 
-5. Create the PostgreSQL audit table.
+5. Create the PostgreSQL audit and trusted loan tables.
 
    ```bash
    python scripts/init_db.py
@@ -321,7 +328,10 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["START"]) --> Check["check_loan_amount: audit ALLOWED / YES"]
+    Start(["START"]) --> Gate["preflight gate: verify token and load trusted amount"]
+    Gate -->|"denied"| Blocked["audit BLOCKED / NO"]
+    Blocked --> BlockedEnd(["END"])
+    Gate -->|"allowed"| Check["check_loan_amount: audit ALLOWED / YES"]
     Check --> Router{"Amount policy"}
     Router -->|"1000 or less"| Auto["auto_approve_loan: audit ALLOWED / YES"]
     Router -->|"over 1000"| Hitl["request_human_approval: audit PENDING / UNKNOWN"]
@@ -336,7 +346,7 @@ flowchart TD
     Monitor --> End(["END"])
 ```
 
-`main.py` calls the monitor after the loan graph returns. For a queued loan, the monitor can be run again after the human decision adds the new dashboard audit entry.
+The preflight gate writes `BLOCKED / NO` and stops the graph before the amount router when a request fails. `main.py` calls the monitor after the loan graph returns. For a queued loan, the monitor can be run again after the human decision adds the new dashboard audit entry.
 
 ### Diagram 3 - Data Agent Violation Flow
 

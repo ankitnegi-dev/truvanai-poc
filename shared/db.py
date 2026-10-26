@@ -11,6 +11,7 @@ import os
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     func,
@@ -35,11 +37,30 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from shared.policy import (
+    APPROVED,
+    AUTO_APPROVED,
+    BLOCKED,
+    PENDING_HITL,
+    REJECTED,
+    SUBMITTED,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
 
 POLICY_STATUSES = frozenset({"ALLOWED", "BLOCKED", "PENDING"})
 VERDICT_CARDS = frozenset({"YES", "NO", "UNKNOWN"})
+LOAN_STATUSES = frozenset(
+    {
+        SUBMITTED,
+        PENDING_HITL,
+        AUTO_APPROVED,
+        APPROVED,
+        REJECTED,
+        BLOCKED,
+    }
+)
 
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -84,6 +105,60 @@ class AgentAuditLog(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+    )
+
+
+class LoanApplication(Base):
+    """Trusted loan application record used by the preflight policy gate."""
+
+    __tablename__ = "loan_applications"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN "
+            "('SUBMITTED', 'PENDING_HITL', 'AUTO_APPROVED', "
+            "'APPROVED', 'REJECTED', 'BLOCKED')",
+            name="ck_loan_applications_status",
+        ),
+        CheckConstraint(
+            "amount >= 0",
+            name="ck_loan_applications_amount_nonnegative",
+        ),
+        Index("ix_loan_applications_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    application_id: Mapped[str] = mapped_column(
+        String(120),
+        nullable=False,
+        unique=True,
+    )
+    customer_id: Mapped[str] = mapped_column(String(120), nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="SUBMITTED",
+    )
+    request_token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    risk_flags: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=list,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
     )
 
 
@@ -149,7 +224,7 @@ async def get_db_connection() -> AsyncIterator[AsyncSession]:
 
 
 async def initialize_database() -> None:
-    """Create the audit trail table if it does not already exist."""
+    """Create the audit and trusted loan tables if they do not exist."""
     async with get_engine().begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
 
@@ -253,3 +328,29 @@ async def get_audit_log_table_name() -> str | None:
             )
         )
     return str(value) if value else None
+
+
+async def get_loan_table_name() -> str | None:
+    """Return the trusted loan table name when it exists."""
+    async with get_engine().connect() as connection:
+        value = await connection.scalar(
+            text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'loan_applications'"
+            )
+        )
+    return str(value) if value else None
+
+
+async def get_loan_table_columns() -> set[str]:
+    """Return the column names present on the trusted loan table."""
+    async with get_engine().connect() as connection:
+        rows = await connection.execute(
+            text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public' "
+                "AND table_name = 'loan_applications'"
+            )
+        )
+    return {str(row[0]) for row in rows}
