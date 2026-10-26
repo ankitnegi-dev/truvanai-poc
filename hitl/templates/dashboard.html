@@ -296,6 +296,132 @@
       font-variant-numeric: tabular-nums;
     }
 
+    .submission-panel {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(330px, 430px);
+      align-items: center;
+      gap: 28px;
+      margin-bottom: 22px;
+      padding: 20px;
+      border: 1px solid var(--color-border);
+      border-radius: var(--radius-column);
+      background: var(--color-surface);
+    }
+
+    .submission-panel h2 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      line-height: 1.2;
+    }
+
+    .submission-panel .eyebrow {
+      margin-bottom: 5px;
+    }
+
+    .submission-description {
+      max-width: 620px;
+      margin: 7px 0 0;
+      color: var(--color-text-secondary);
+      font-size: 12px;
+    }
+
+    .loan-form {
+      display: grid;
+      gap: 7px;
+    }
+
+    .loan-form label {
+      color: var(--color-text-secondary);
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .loan-form-row {
+      display: flex;
+      gap: 8px;
+    }
+
+    .amount-input {
+      display: flex;
+      flex: 1;
+      align-items: center;
+      gap: 6px;
+      height: 39px;
+      min-width: 0;
+      padding: 0 11px;
+      border: 1px solid var(--color-border-strong);
+      border-radius: var(--radius-control);
+      background: var(--color-surface-raised);
+      transition:
+        border-color var(--transition-fast),
+        box-shadow var(--transition-fast);
+    }
+
+    .amount-input:focus-within {
+      border-color: var(--color-focus);
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+    }
+
+    .amount-prefix {
+      color: var(--color-text-muted);
+      font-size: 13px;
+    }
+
+    .amount-input input {
+      width: 100%;
+      min-width: 0;
+      padding: 0;
+      border: 0;
+      outline: 0;
+      background: transparent;
+      color: var(--color-text-primary);
+      font: inherit;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .amount-input input::placeholder {
+      color: var(--color-text-muted);
+    }
+
+    .button--submit {
+      flex: none;
+      height: 39px;
+      padding: 0 15px;
+    }
+
+    .form-hint {
+      margin: 0;
+      color: var(--color-text-muted);
+      font-size: 10px;
+    }
+
+    .loan-result {
+      margin-top: 3px;
+      padding: 9px 11px;
+      border: 1px solid var(--color-border);
+      border-left: 3px solid var(--color-text-muted);
+      border-radius: 8px;
+      background: var(--color-surface-raised);
+      color: var(--color-text-secondary);
+      font-size: 11px;
+      line-height: 1.45;
+    }
+
+    .loan-result[data-variant="approved"] {
+      border-left-color: var(--color-approved);
+    }
+
+    .loan-result[data-variant="pending"] {
+      border-left-color: var(--color-pending);
+    }
+
+    .loan-result[data-variant="blocked"],
+    .loan-result[data-variant="error"] {
+      border-left-color: var(--color-rejected);
+    }
+
     .board {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -852,6 +978,10 @@
       border-left-color: var(--color-approved);
     }
 
+    .toast--pending {
+      border-left-color: var(--color-pending);
+    }
+
     .toast--rejected {
       border-left-color: var(--color-rejected);
     }
@@ -871,6 +1001,10 @@
 
     .toast--success .toast-dot {
       background: var(--color-approved);
+    }
+
+    .toast--pending .toast-dot {
+      background: var(--color-pending);
     }
 
     .toast--rejected .toast-dot,
@@ -902,6 +1036,11 @@
     }
 
     @media (max-width: 960px) {
+      .submission-panel {
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+
       .board {
         grid-template-columns: 1fr;
       }
@@ -952,6 +1091,18 @@
 
       .last-updated {
         margin-top: 12px;
+      }
+
+      .submission-panel {
+        padding: 16px;
+      }
+
+      .loan-form-row {
+        flex-direction: column;
+      }
+
+      .button--submit {
+        height: 39px;
       }
 
       .audit-panel {
@@ -1035,10 +1186,54 @@
         <div>
           <p class="eyebrow">Human in the loop</p>
           <h2>Loan approval queue</h2>
-          <p class="page-description">Review high-value requests before a final decision is recorded.</p>
+          <p class="page-description">Submit any amount. Requests up to ${{ approval_threshold_display }} are auto-approved; larger requests route to human review.</p>
         </div>
         <p class="last-updated" id="lastUpdated">Waiting for live data</p>
       </div>
+
+      <section class="submission-panel" aria-labelledby="requestHeading">
+        <div class="submission-copy">
+          <p class="eyebrow">New loan request</p>
+          <h2 id="requestHeading">Request a loan</h2>
+          <p class="submission-description">
+            Enter an amount to run the governance flow. The agent decides the route from the trusted amount stored in PostgreSQL.
+          </p>
+        </div>
+        <form
+          class="loan-form"
+          id="loanForm"
+          data-max-amount="{{ max_loan_amount }}"
+          novalidate
+        >
+          <label for="loanAmount">Loan amount (USD)</label>
+          <div class="loan-form-row">
+            <div class="amount-input">
+              <span class="amount-prefix" aria-hidden="true">$</span>
+              <input
+                id="loanAmount"
+                name="amount"
+                type="number"
+                inputmode="decimal"
+                min="0.01"
+                max="{{ max_loan_amount }}"
+                step="0.01"
+                placeholder="0.00"
+                autocomplete="off"
+                aria-describedby="loanAmountHint"
+                required
+              >
+            </div>
+            <button class="button button--submit" id="loanSubmit" type="submit">
+              <span class="button-spinner" aria-hidden="true"></span>
+              <span>Submit request</span>
+            </button>
+          </div>
+          <p class="form-hint" id="loanAmountHint">
+            Between $0.01 and ${{ max_loan_amount_display }}. Use up to two decimal places.
+          </p>
+          <div class="loan-result" id="loanResult" role="status" aria-live="polite" hidden></div>
+        </form>
+      </section>
 
       <section class="board" aria-label="Loan approval status columns">
         <section class="board-column column-pending" aria-labelledby="pendingHeading">
@@ -1066,12 +1261,12 @@
             </div>
             <span class="column-count" id="approvedCount" aria-label="Approved count">0</span>
           </div>
-          <p class="column-description">Approved by a human reviewer</p>
+          <p class="column-description">Automatic and human approvals</p>
           <div class="card-list" id="approvedList" aria-live="polite"></div>
           <div class="empty-state" id="approvedEmpty">
             <span class="empty-mark" aria-hidden="true"></span>
             <p>No approved loans</p>
-            <span>Resolved approvals will be listed here.</span>
+            <span>Approved requests will be listed here.</span>
           </div>
         </section>
 
@@ -1150,7 +1345,11 @@
         liveChip: document.getElementById("liveChip"),
         liveLabel: document.getElementById("liveLabel"),
         lastUpdated: document.getElementById("lastUpdated"),
-        toastRegion: document.getElementById("toastRegion")
+        toastRegion: document.getElementById("toastRegion"),
+        loanForm: document.getElementById("loanForm"),
+        loanAmount: document.getElementById("loanAmount"),
+        loanSubmit: document.getElementById("loanSubmit"),
+        loanResult: document.getElementById("loanResult")
       };
 
       const currencyFormatter = new Intl.NumberFormat("en-US", {
@@ -1185,6 +1384,7 @@
       let reconnectAttempt = 0;
       let suppressRealtime = 0;
       let actionInFlight = false;
+      let loanInFlight = false;
 
       function escapeHtml(value) {
         const escapes = {
@@ -1285,6 +1485,11 @@
             <span class="detail-label">Resolved</span>
             <span class="detail-value">${escapeHtml(formatCardTime(resolvedAt))}</span>
           </div>`;
+        const resolutionRow = status === "approved" ? `
+          <div class="detail-row">
+            <span class="detail-label">Approved by</span>
+            <span class="detail-value">${item.resolution === "automatic" ? "Automatic policy" : "Human reviewer"}</span>
+          </div>` : "";
 
         const actions = status === "pending" && applicationId ? `
           <div class="card-actions">
@@ -1330,7 +1535,7 @@
               <div class="detail-row">
                 <span class="detail-label">Agent</span>
                 <span class="detail-value">${escapeHtml(agentName)}</span>
-              </div>${resolvedRow}
+              </div>${resolutionRow}${resolvedRow}
             </div>
             ${actions}
           </article>`;
@@ -1423,6 +1628,15 @@
           if (body && typeof body.detail === "string") {
             return body.detail;
           }
+          if (body && Array.isArray(body.detail)) {
+            const messages = body.detail
+              .map((item) => (item && typeof item.msg === "string" ? item.msg : ""))
+              .filter(Boolean)
+              .map((message) => message.replace(/^Value error,\s*/, ""));
+            if (messages.length > 0) {
+              return messages.join(" ");
+            }
+          }
         } catch (error) {
           // Fall back to the status text below when no JSON body is present.
         }
@@ -1453,6 +1667,128 @@
 
       function waitForAnimation(milliseconds) {
         return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+      }
+
+      function setLoanResult(message, variant) {
+        refs.loanResult.hidden = false;
+        refs.loanResult.dataset.variant = variant || "pending";
+        refs.loanResult.textContent = message;
+      }
+
+      function clearLoanResult() {
+        refs.loanResult.hidden = true;
+        refs.loanResult.textContent = "";
+        delete refs.loanResult.dataset.variant;
+      }
+
+      function parseLoanAmount(rawValue) {
+        const text = String(rawValue ?? "").trim();
+        if (!text) {
+          return { error: "Enter a loan amount." };
+        }
+        if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
+          return { error: "Use a number with no more than two decimal places." };
+        }
+        const amount = Number(text);
+        if (!Number.isFinite(amount) || amount <= 0) {
+          return { error: "Enter a loan amount greater than zero." };
+        }
+        const maxAmount = Number(refs.loanForm.dataset.maxAmount);
+        if (Number.isFinite(maxAmount) && amount > maxAmount) {
+          return { error: `Loan amount cannot exceed ${formatAmount(maxAmount)}.` };
+        }
+        return { amount };
+      }
+
+      async function handleLoanSubmit(event) {
+        event.preventDefault();
+        if (loanInFlight) {
+          return;
+        }
+
+        const parsed = parseLoanAmount(refs.loanAmount.value);
+        if (parsed.error) {
+          setLoanResult(parsed.error, "error");
+          refs.loanAmount.focus();
+          return;
+        }
+
+        loanInFlight = true;
+        suppressRealtime += 1;
+        clearLoanResult();
+        refs.loanAmount.disabled = true;
+        refs.loanSubmit.disabled = true;
+        refs.loanSubmit.classList.add("is-loading");
+        refs.loanSubmit.setAttribute("aria-busy", "true");
+
+        try {
+          const response = await fetch("/api/loans", {
+            method: "POST",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json"
+            },
+            credentials: "same-origin",
+            body: JSON.stringify({ amount: parsed.amount })
+          });
+
+          if (response.status === 401) {
+            throw new Error("Authentication required. Refresh the page to sign in.");
+          }
+          if (!response.ok) {
+            throw new Error(await responseError(response));
+          }
+
+          const payload = await response.json();
+          const status = typeof payload.status === "string" ? payload.status : "";
+          const variant = status === "approved"
+            ? "approved"
+            : status === "pending"
+              ? "pending"
+              : "blocked";
+          const message = typeof payload.message === "string" && payload.message.trim()
+            ? payload.message
+            : `Application ${payload.application_id || "created"} is ${status || "processed"}.`;
+
+          setLoanResult(message, variant);
+          refs.loanForm.reset();
+
+          let refreshFailed = false;
+          try {
+            await loadState();
+          } catch (error) {
+            refreshFailed = true;
+          }
+
+          const toastMessage = status === "approved"
+            ? `Application ${payload.application_id || ""} auto-approved.`.trim()
+            : status === "pending"
+              ? `Application ${payload.application_id || ""} queued for human review.`.trim()
+              : `Application ${payload.application_id || ""} was blocked.`.trim();
+          const toastVariant = variant === "approved"
+            ? "success"
+            : variant === "pending"
+              ? "pending"
+              : "rejected";
+          showToast(toastMessage, toastVariant);
+          if (refreshFailed) {
+            showToast(
+              "The request was processed, but the dashboard refresh failed. It will retry automatically.",
+              "error"
+            );
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "The loan request could not be submitted.";
+          setLoanResult(message, "error");
+          showToast(message, "error");
+        } finally {
+          refs.loanAmount.disabled = false;
+          refs.loanSubmit.disabled = false;
+          refs.loanSubmit.classList.remove("is-loading");
+          refs.loanSubmit.removeAttribute("aria-busy");
+          suppressRealtime = Math.max(0, suppressRealtime - 1);
+          loanInFlight = false;
+        }
       }
 
       async function handleDecision(button) {
@@ -1587,6 +1923,13 @@
       }
 
       function initializeDashboard() {
+        refs.loanForm.addEventListener("submit", handleLoanSubmit);
+        refs.loanAmount.addEventListener("input", () => {
+          if (!refs.loanResult.hidden) {
+            clearLoanResult();
+          }
+        });
+
         document.addEventListener("click", (event) => {
           const button = event.target.closest("button[data-action]");
           if (!button) {

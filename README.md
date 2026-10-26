@@ -8,6 +8,7 @@ This repository is a hiring assessment for TruvanAI, an AI governance platform. 
 
 - **HITL review:** agents cannot act on high-stakes decisions without human approval.
 - **Preflight gate:** loan requests are verified against trusted PostgreSQL state before any approval or HITL side effect.
+- **User-defined intake:** a signed-in reviewer enters a loan amount in the dashboard, and the trusted intake endpoint writes it to PostgreSQL before the agent runs.
 - **Policy enforcement:** the monitor agent detects and blocks violations.
 - **Audit trail:** every agent action is logged permanently with a verdict card of `YES`, `NO`, or `UNKNOWN`.
 - **Real infrastructure:** PostgreSQL, Redis, Groq API, and Gmail SMTP are used directly.
@@ -27,6 +28,8 @@ Evaluates loan requests and routes them by amount.
 Flow: preflight gate -> trusted amount -> amount <= 1000 -> auto approve. amount > 1000 -> HITL queue -> human decision. denied -> BLOCKED / NO.
 
 Before any loan tool runs, a preflight gate verifies the opaque request token against `loan_applications`, loads the amount from PostgreSQL, rejects expired or replayed tokens, risk flags, and invalid state transitions, and writes `BLOCKED / NO`. A denied request never reaches auto-approval or the Redis queue. Scenario 2 also attempts a tampered amount claim, which the gate blocks before the queue.
+
+The dashboard is also the trusted intake for user-defined requests. After sign-in, the reviewer enters an amount. `POST /api/loans` creates a `WEB-*` application in `loan_applications`, issues a one-time opaque request token, and runs the same loan graph. Requests at or below `1000.00` auto-approve. Requests above `1000.00` enter the Redis HITL queue. The browser never supplies the amount to a side-effecting tool; the gate reloads it from PostgreSQL. The raw token is never returned to the browser.
 
 ### Agent 2 - Restricted Data Agent
 Reads approved account data only. Cannot access sensitive fields.
@@ -52,6 +55,12 @@ Flow: scan audit log -> check rules -> violation found -> block action -> send G
 ## Architecture
 
 ```text
+Browser (signed-in reviewer)
+    |
+    |--> FastAPI Dashboard --> POST /api/loans --> trusted intake
+    |                                          --> loan_applications (PostgreSQL)
+    |                                          --> Loan Agent
+    |
 main.py (orchestrator)
     |
     |--> Loan Agent --> preflight gate (token + trusted amount)
@@ -81,7 +90,7 @@ The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same r
 | --- | --- | --- |
 | Agent orchestration | Python 3.11+, LangGraph | Deterministic state graphs for loan, data, and monitoring work |
 | Model access | Groq API with ChatGroq | Primary and fallback models for summaries and tool-calling configuration |
-| HITL dashboard | FastAPI, Jinja2, WebSockets | Human review of pending loans with live state updates |
+| HITL dashboard | FastAPI, Jinja2, WebSockets | Human review of pending loans, trusted intake for user-defined amounts, and live state updates |
 | Dashboard auth | HTTP Basic auth plus signed session cookie | Protect the dashboard and decision endpoints with `HITL_PASSWORD` |
 | Audit trail | PostgreSQL, SQLAlchemy async, asyncpg | Permanent agent action records and verdict cards |
 | Trusted loan state | PostgreSQL `loan_applications` | Source of truth for amounts, status, token hashes, and risk flags |
@@ -255,13 +264,27 @@ The local values in `.env.example` already point to these ports. Stop the servic
    uvicorn hitl.dashboard:app --port 8000
    ```
 
-7. Run the orchestrator in a second terminal.
+7. Open [http://localhost:8000](http://localhost:8000) and sign in with the password set via HITL_PASSWORD in your environment. Enter the amount you want to request. Amounts at or below `1000.00` are auto-approved. Larger amounts appear in the Pending column for review.
+
+8. Optional: run the orchestrator in a second terminal to seed the scripted `APP001` and `APP002` demo scenarios.
 
    ```bash
    python main.py
    ```
 
-8. Open [http://localhost:8000](http://localhost:8000) and sign in with the password set via HITL_PASSWORD in your environment.
+### User-defined loan requests
+
+The dashboard is the trusted intake for new loans. Sign in and enter an amount. The browser sends it to `POST /api/loans`, which requires the dashboard session or Basic auth.
+
+1. The endpoint creates a `WEB-*` application in `loan_applications` with a hashed request token.
+2. The loan graph runs the preflight gate and reloads the amount from PostgreSQL.
+3. An amount at or below `1000.00` is auto-approved and appears in the Approved column with the label `Automatic policy`.
+4. An amount above `1000.00` is placed in the Redis queue and appears in the Pending column.
+5. A human approve or reject writes the decision and audit row, then the Approved or Rejected column updates.
+
+The API returns only safe fields. It never returns the raw request token. Invalid amounts are rejected before intake: the amount must be greater than zero, at most `9,999,999,999.99`, and have at most two decimal places.
+
+The dashboard uses only the PostgreSQL amount for routing. Posting a different amount directly to a tool is still blocked by the preflight gate.
 
 ## Cloud deployment (Render)
 
@@ -283,6 +306,7 @@ The project was built in deliberate commit stages so the governance layers can b
 | 8 | `feat: end-to-end orchestrator and Render deployment` | Three-scenario orchestrator, error isolation, local Docker Compose infrastructure, Procfile, and Render service configuration. |
 | 9 | `docs: final README with architecture diagrams and setup guide` | Complete project documentation, Mermaid diagrams, local setup, deployment notes, and placeholder screenshots. |
 | 10 | `fix: prevent duplicate monitor alerts and add health check` | Audit-based deduplication for already handled violations and an unauthenticated `/health` endpoint wired to the Render health check. |
+| 11 | `feat: user-defined loan amount from the dashboard` | Authenticated loan intake, amount validation, automatic approval rendering, and HITL routing for user-defined amounts. |
 
 ## Diagrams
 
@@ -328,7 +352,9 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Start(["START"]) --> Gate["preflight gate: verify token and load trusted amount"]
+    Browser["Dashboard amount form"] --> Intake["POST /api/loans: trusted intake"]
+    Intake --> Start(["START"])
+    Start --> Gate["preflight gate: verify token and load trusted amount"]
     Gate -->|"denied"| Blocked["audit BLOCKED / NO"]
     Blocked --> BlockedEnd(["END"])
     Gate -->|"allowed"| Check["check_loan_amount: audit ALLOWED / YES"]

@@ -18,6 +18,7 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager, suppress
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, AsyncIterator
 
@@ -33,11 +34,16 @@ from fastapi import (
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, field_validator
 from redis.asyncio import Redis
 
+from agents.loan_agent import run_loan_application
 from shared.db import get_recent_actions, log_action
 from shared.loan_store import (
+    IssuedLoanRequest,
     get_loan_application,
+    get_recent_auto_approved_loans,
+    issue_loan_request,
     resolve_hitl_loan,
     restore_hitl_loan,
 )
@@ -45,6 +51,8 @@ from shared.policy import (
     HITL_APPROVED_QUEUE,
     HITL_QUEUE,
     HITL_REJECTED_QUEUE,
+    HUMAN_APPROVAL_THRESHOLD,
+    MAX_LOAN_AMOUNT,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -57,6 +65,33 @@ REJECTED_QUEUE = HITL_REJECTED_QUEUE
 SESSION_COOKIE = "truvanai_hitl_session"
 SESSION_MAX_AGE_SECONDS = 8 * 60 * 60
 WATCH_INTERVAL_SECONDS = 1.0
+MAX_LOAN_AMOUNT_DECIMAL = Decimal(str(MAX_LOAN_AMOUNT))
+CENT = Decimal("0.01")
+
+
+class LoanSubmission(BaseModel):
+    """A user-defined loan amount submitted through the dashboard."""
+
+    amount: Decimal
+
+    @field_validator("amount")
+    @classmethod
+    def validate_amount(cls, value: Decimal) -> Decimal:
+        """Accept a positive amount with no more than two decimal places."""
+        if not value.is_finite() or value <= 0:
+            raise ValueError("Enter a loan amount greater than zero.")
+        if value > MAX_LOAN_AMOUNT_DECIMAL:
+            raise ValueError(
+                f"Loan amount cannot exceed {MAX_LOAN_AMOUNT_DECIMAL:,.2f}."
+            )
+        try:
+            quantized = value.quantize(CENT)
+        except InvalidOperation as exc:
+            raise ValueError("Use no more than two decimal places.") from exc
+        if quantized != value:
+            raise ValueError("Use no more than two decimal places.")
+        return quantized
+
 
 logger = logging.getLogger("truvanai.hitl")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -222,20 +257,88 @@ def _parse_queue_items(raw_items: list[str]) -> list[dict[str, Any]]:
 
 
 async def _build_dashboard_state() -> dict[str, Any]:
-    """Read pending, resolved, and latest audit data from live services."""
+    """Read pending, resolved, automatic approvals, and recent audit data."""
     client = get_redis_client()
-    pending_raw, approved_raw, rejected_raw, audit = await asyncio.gather(
-        client.lrange(PENDING_QUEUE, 0, -1),
-        client.lrange(APPROVED_QUEUE, 0, -1),
-        client.lrange(REJECTED_QUEUE, 0, -1),
-        get_recent_actions(limit=10),
+    pending_raw, approved_raw, rejected_raw, audit, auto_approved = (
+        await asyncio.gather(
+            client.lrange(PENDING_QUEUE, 0, -1),
+            client.lrange(APPROVED_QUEUE, 0, -1),
+            client.lrange(REJECTED_QUEUE, 0, -1),
+            get_recent_actions(limit=10),
+            get_recent_auto_approved_loans(limit=10),
+        )
     )
+
+    approved = _parse_queue_items(approved_raw)
+    seen_ids: set[str] = set()
+    for item in approved:
+        item["resolution"] = "human"
+        application_id = item.get("application_id")
+        if isinstance(application_id, str) and application_id:
+            seen_ids.add(application_id)
+    for item in auto_approved:
+        if item["application_id"] in seen_ids:
+            continue
+        approved.append(item)
+        seen_ids.add(item["application_id"])
+
     return {
         "pending": _parse_queue_items(pending_raw),
-        "approved": _parse_queue_items(approved_raw),
+        "approved": approved,
         "rejected": _parse_queue_items(rejected_raw),
         "audit": audit,
     }
+
+
+def _new_web_application_id() -> str:
+    """Return a unique application identifier for a dashboard submission."""
+    date_stamp = time.strftime("%Y%m%d", time.gmtime())
+    return f"WEB-{date_stamp}-{secrets.token_hex(4).upper()}"
+
+
+def _serialize_loan_submission(
+    issued: IssuedLoanRequest,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Return safe submission fields without the raw request token."""
+    status = str(result.get("status") or issued.status)
+    human_required = bool(result.get("human_required", False))
+    amount_display = f"{issued.amount:,.2f}"
+    threshold_display = f"{HUMAN_APPROVAL_THRESHOLD:,.2f}"
+
+    if status == "approved":
+        resolution = "automatic"
+        message = (
+            f"Loan {issued.application_id} for ${amount_display} was "
+            f"auto-approved because the amount is at or below "
+            f"${threshold_display}."
+        )
+    elif status == "pending":
+        resolution = "human_review"
+        message = (
+            f"Loan {issued.application_id} for ${amount_display} requires "
+            f"human review because the amount is above ${threshold_display}."
+        )
+    else:
+        resolution = "blocked"
+        message = (
+            f"Loan {issued.application_id} for ${amount_display} was blocked "
+            "by the preflight gate."
+        )
+
+    payload: dict[str, Any] = {
+        "application_id": issued.application_id,
+        "amount": issued.amount,
+        "status": status,
+        "human_required": human_required,
+        "resolution": resolution,
+        "approval_threshold": HUMAN_APPROVAL_THRESHOLD,
+        "message": message,
+    }
+    blocked_reason = result.get("blocked_reason")
+    if status == "blocked" and isinstance(blocked_reason, str):
+        payload["blocked_reason"] = blocked_reason
+    return payload
 
 
 MOVE_ITEM_SCRIPT = """
@@ -512,7 +615,11 @@ async def dashboard(
     response = templates.TemplateResponse(
         request=request,
         name="dashboard.html",
-        context={},
+        context={
+            "approval_threshold_display": f"{HUMAN_APPROVAL_THRESHOLD:,.2f}",
+            "max_loan_amount": MAX_LOAN_AMOUNT,
+            "max_loan_amount_display": f"{MAX_LOAN_AMOUNT:,.2f}",
+        },
     )
     response.headers["Cache-Control"] = "no-store"
     forwarded_proto = (
@@ -561,6 +668,55 @@ async def get_dashboard_state(
             status_code=503,
             detail="Dashboard data is temporarily unavailable.",
         ) from exc
+
+
+@app.post("/api/loans", status_code=201)
+async def submit_loan(
+    submission: LoanSubmission,
+    _auth: None = Depends(require_hitl_auth),
+) -> dict[str, Any]:
+    """Create a trusted loan request and route it through the loan graph."""
+    application_id = _new_web_application_id()
+    try:
+        issued = await issue_loan_request(
+            application_id=application_id,
+            customer_id=f"CUST-{application_id}",
+            amount=float(submission.amount),
+        )
+    except (TypeError, ValueError) as exc:
+        logger.warning("Rejected loan submission: %s", exc)
+        raise HTTPException(
+            status_code=400,
+            detail="The loan request could not be created.",
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to create a trusted loan request.")
+        raise HTTPException(
+            status_code=503,
+            detail="The trusted loan store is temporarily unavailable.",
+        ) from exc
+
+    try:
+        result = await run_loan_application(
+            application_id=issued.application_id,
+            request_token=issued.request_token,
+        )
+    except Exception as exc:
+        logger.exception(
+            "Loan %s was created but the loan graph failed.",
+            issued.application_id,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                f"Loan {issued.application_id} was created but could not be "
+                "processed. Check the audit trail before retrying."
+            ),
+        ) from exc
+
+    payload = _serialize_loan_submission(issued, result)
+    await _broadcast_state_safely()
+    return payload
 
 
 @app.post("/api/approve/{application_id}")

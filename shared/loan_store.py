@@ -307,6 +307,43 @@ async def get_loan_application(
     }
 
 
+async def get_recent_auto_approved_loans(
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Return recent automatic approvals for dashboard display."""
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        raise TypeError("limit must be an integer.")
+    if limit < 1:
+        raise ValueError("limit must be positive.")
+    clean_limit = min(limit, 50)
+
+    statement = (
+        select(LoanApplication)
+        .where(LoanApplication.status == AUTO_APPROVED)
+        .order_by(
+            LoanApplication.updated_at.desc(),
+            LoanApplication.id.desc(),
+        )
+        .limit(clean_limit)
+    )
+    async with get_db_connection() as session:
+        rows = (await session.scalars(statement)).all()
+
+    return [
+        {
+            "application_id": row.application_id,
+            "customer_id": row.customer_id,
+            "amount": float(row.amount),
+            "status": "approved",
+            "requested_at": _as_utc(row.created_at).isoformat(),
+            "resolved_at": _as_utc(row.updated_at).isoformat(),
+            "agent_name": "loan_agent",
+            "resolution": "automatic",
+        }
+        for row in rows
+    ]
+
+
 async def authorize_loan_action(
     application_id: str,
     request_token: str,
