@@ -11,6 +11,8 @@ import asyncio
 import json
 import math
 import os
+import urllib.error
+import urllib.request
 import warnings
 from collections.abc import Mapping
 from pathlib import Path
@@ -49,6 +51,8 @@ RESULT_SEPARATOR = "-" * 60
 SCENARIO_SEPARATOR = "=" * 60
 LOAN_LABEL_WIDTH = 11
 DATA_LABEL_WIDTH = 17
+WEBHOOK_LABEL_WIDTH = 15
+DEFAULT_DASHBOARD_URL = "http://localhost:8000"
 
 
 def _result_text(value: Any) -> str:
@@ -205,6 +209,109 @@ def pretty_print_result(result: Mapping[str, Any]) -> None:
     print(RESULT_SEPARATOR)
 
 
+def _dashboard_url() -> str:
+    """Return the dashboard base URL used by the webhook scenario."""
+    value = os.getenv("DASHBOARD_URL", DEFAULT_DASHBOARD_URL).strip()
+    return (value or DEFAULT_DASHBOARD_URL).rstrip("/")
+
+
+def _post_webhook_event(payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Post one external agent event to the governance webhook."""
+    api_key = os.getenv("WEBHOOK_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError(
+            "WEBHOOK_API_KEY is not set. Add it to .env and restart the "
+            "dashboard before running Scenario 4."
+        )
+
+    request = urllib.request.Request(
+        f"{_dashboard_url()}/api/events",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "X-API-Key": api_key,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            body = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            f"Webhook returned HTTP {exc.code}: {detail}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(
+            f"Dashboard is not reachable at {_dashboard_url()}."
+        ) from exc
+
+    result = json.loads(body)
+    if not isinstance(result, dict):
+        raise RuntimeError("Webhook returned an unexpected response.")
+    return result
+
+
+async def _post_webhook_event_async(
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Run the blocking webhook call outside the event loop."""
+    return await asyncio.to_thread(_post_webhook_event, payload)
+
+
+def _print_webhook_result(result: Mapping[str, Any]) -> None:
+    """Print one external webhook verdict in a readable layout."""
+    rules = result.get("rules_triggered")
+    if isinstance(rules, list) and rules:
+        rules_text = ", ".join(str(rule) for rule in rules)
+    else:
+        rules_text = "None"
+
+    print(RESULT_SEPARATOR)
+    _print_field(
+        "Event",
+        str(result.get("event_id", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Agent",
+        str(result.get("agent", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Action",
+        str(result.get("action", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Application",
+        str(result.get("application_id", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Amount",
+        _format_amount(result.get("amount")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Verdict",
+        str(result.get("verdict", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field(
+        "Verdict card",
+        str(result.get("verdict_card", "Unknown")),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    _print_field("Rules triggered", rules_text, WEBHOOK_LABEL_WIDTH)
+    _print_field(
+        "Alerts sent",
+        str(result.get("alerts_sent", 0)),
+        WEBHOOK_LABEL_WIDTH,
+    )
+    print(RESULT_SEPARATOR)
+
+
 def _print_scenario_header(number: int, title: str) -> None:
     """Print a clear separator before each scenario."""
     print("\n" + SCENARIO_SEPARATOR)
@@ -282,7 +389,7 @@ async def _demonstrate_gate_tamper(
 
 
 async def main() -> None:
-    """Run database setup and all three governance scenarios in order."""
+    """Run database setup and all four governance scenarios in order."""
     try:
         await init_db()
         print("Database initialized")
@@ -345,6 +452,56 @@ async def main() -> None:
             print("Monitor check complete")
     except Exception as exc:
         print(f"Scenario 3 failed: {exc}")
+
+    try:
+        _print_scenario_header(4, "External bank agent webhook")
+        print(f"Dashboard endpoint: {_dashboard_url()}/api/events")
+
+        allowed_event = {
+            "agent": "bank_loan_agent",
+            "action": "auto_approve_loan",
+            "application_id": "EXT-APP-LOW",
+            "amount": 750.0,
+            "parameters": {
+                "channel": "external_webhook",
+                "customer_segment": "retail",
+            },
+        }
+        allowed_result = await _post_webhook_event_async(allowed_event)
+        _print_webhook_result(allowed_result)
+        if allowed_result.get("verdict") != "ALLOWED":
+            raise RuntimeError(
+                "The monitor did not allow the low-value external event."
+            )
+
+        violation_event = {
+            "agent": "bank_loan_agent",
+            "action": "auto_approve_loan",
+            "application_id": "EXT-APP-HIGH",
+            "amount": 2500.0,
+            "parameters": {
+                "channel": "external_webhook",
+                "customer_segment": "retail",
+            },
+        }
+        violation_result = await _post_webhook_event_async(
+            violation_event
+        )
+        _print_webhook_result(violation_result)
+        if violation_result.get("verdict") != "BLOCKED":
+            raise RuntimeError(
+                "The monitor did not block the high-value external event."
+            )
+        print(
+            "Monitor blocked the external action and sent the Gmail alert"
+        )
+        await asyncio.sleep(2)
+    except Exception as exc:
+        print(f"Scenario 4 failed: {exc}")
+        print(
+            "Start the dashboard first: "
+            "uvicorn hitl.dashboard:app --port 8000"
+        )
 
 
 if __name__ == "__main__":

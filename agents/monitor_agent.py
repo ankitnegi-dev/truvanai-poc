@@ -1,6 +1,9 @@
 """LangGraph monitor agent for TruvanAI governance enforcement.
 
-The monitor scans the latest audit entries with two hardcoded policy rules.
+The monitor checks recent audit entries, or a specific set of action IDs
+reported through the external webhook, against two hardcoded policy rules.
+The rules are action-based, so they apply equally to the POC's internal agents
+and to an external bank agent that reports through ``POST /api/events``.
 Matching actions are marked as blocked in PostgreSQL and sent to the Gmail
 alert tool. Policy decisions remain deterministic; the configured Groq model
 is available for explanation work but has no authority over blocking.
@@ -11,7 +14,7 @@ from __future__ import annotations
 import json
 import math
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -23,6 +26,7 @@ from sqlalchemy import select, update
 
 from shared.db import (
     AgentAuditLog,
+    get_actions_by_ids,
     get_db_connection,
     get_recent_actions,
     log_action,
@@ -36,6 +40,7 @@ load_dotenv(PROJECT_ROOT / ".env")
 AGENT_NAME = "monitor_agent"
 LARGE_LOAN_RULE = "large_loan_no_human_approval"
 SENSITIVE_DATA_RULE = "sensitive_data_access"
+SENSITIVE_DATA_ACTION = "access_sensitive_data"
 
 model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 fallback_model = os.getenv("GROQ_FALLBACK_MODEL", "openai/gpt-oss-20b")
@@ -45,6 +50,8 @@ class AgentState(TypedDict):
     """State shared by the monitoring graph nodes."""
 
     recent_actions: list[dict[str, Any]]
+    actions_to_check: list[dict[str, Any]]
+    action_ids: list[int]
     violations_found: list[dict[str, Any]]
     actions_blocked: list[int]
     alerts_sent: list[str]
@@ -176,9 +183,12 @@ def _large_loan_violation(
     action: Mapping[str, Any],
     recent_actions: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    """Apply the large loan auto approval rule to one audit action."""
-    if action.get("agent_name") != "loan_agent":
-        return None
+    """Apply the large loan auto approval rule to one audit action.
+
+    The rule is action-based rather than agent-based. Any agent, including an
+    external bank agent reporting through the webhook, that auto-approves an
+    amount above the human approval threshold is a violation.
+    """
     if action.get("action_name") != AUTO_APPROVE_ACTION:
         return None
 
@@ -220,10 +230,12 @@ def _large_loan_violation(
 def _sensitive_data_violation(
     action: Mapping[str, Any],
 ) -> dict[str, Any] | None:
-    """Apply the sensitive data access rule to one audit action."""
-    if action.get("agent_name") != "data_agent":
-        return None
-    if action.get("action_name") != "access_sensitive_data":
+    """Apply the sensitive data access rule to one audit action.
+
+    This rule is also action-based so an external agent cannot avoid the
+    policy by using a different agent name in its webhook payload.
+    """
+    if action.get("action_name") != SENSITIVE_DATA_ACTION:
         return None
     return _make_violation(
         action,
@@ -233,16 +245,48 @@ def _sensitive_data_violation(
 
 
 async def action_fetcher(state: AgentState) -> dict[str, Any]:
-    """Fetch recent audit actions and apply the optional agent filter."""
-    actions = await get_recent_actions(limit=10)
+    """Fetch audit actions and select exactly which actions to check.
+
+    Without an action filter the monitor checks the latest ten rows. With an
+    action filter, as used by the webhook, it reads those rows directly and
+    keeps a wider recent window for the amount-correlation rule.
+    """
+    action_ids = list(state.get("action_ids") or [])
     agent_filter = state.get("agent_filter")
+
+    if action_ids:
+        actions_to_check = await get_actions_by_ids(action_ids)
+        recent_actions = await get_recent_actions(limit=50)
+        merged_actions = {
+            action["id"]: action for action in recent_actions
+        }
+        for action in actions_to_check:
+            merged_actions[action["id"]] = action
+        recent_actions = sorted(
+            merged_actions.values(),
+            key=lambda action: (action["timestamp"], action["id"]),
+            reverse=True,
+        )
+    else:
+        recent_actions = await get_recent_actions(limit=10)
+        actions_to_check = recent_actions
+
     if agent_filter:
-        actions = [
+        actions_to_check = [
             action
-            for action in actions
+            for action in actions_to_check
             if action.get("agent_name") == agent_filter
         ]
-    return {"recent_actions": actions}
+        recent_actions = [
+            action
+            for action in recent_actions
+            if action.get("agent_name") == agent_filter
+        ]
+
+    return {
+        "recent_actions": recent_actions,
+        "actions_to_check": actions_to_check,
+    }
 
 
 async def _previously_blocked_action_ids(
@@ -270,11 +314,12 @@ async def _previously_blocked_action_ids(
 
 
 async def policy_checker(state: AgentState) -> dict[str, Any]:
-    """Check every recent action against both hardcoded policy rules."""
+    """Check every selected action against both hardcoded policy rules."""
     violations: list[dict[str, Any]] = []
     recent_actions = state["recent_actions"]
+    actions_to_check = state.get("actions_to_check") or recent_actions
 
-    for action in recent_actions:
+    for action in actions_to_check:
         large_loan_violation = _large_loan_violation(action, recent_actions)
         if large_loan_violation is not None:
             violations.append(large_loan_violation)
@@ -369,17 +414,44 @@ def build_monitor_graph():
 monitor_graph = build_monitor_graph()
 
 
-async def run_monitor(agent_name: str | None = None) -> AgentState:
-    """Run the full monitor graph with an optional agent name filter."""
+async def run_monitor(
+    agent_name: str | None = None,
+    action_ids: list[int] | None = None,
+) -> AgentState:
+    """Run the full monitor graph with optional agent and action filters.
+
+    ``action_ids`` is used by the external webhook so a bank event is checked
+    on its own rather than relying on whatever happens to be in the last ten
+    audit rows. ``agent_name`` remains available for the internal demo.
+    """
     clean_agent_name: str | None = None
     if agent_name is not None:
         if not isinstance(agent_name, str) or not agent_name.strip():
             raise ValueError("agent_name must be a non-empty string when set.")
         clean_agent_name = agent_name.strip()
 
+    clean_action_ids: list[int] = []
+    if action_ids is not None:
+        if isinstance(action_ids, (str, bytes)) or not isinstance(
+            action_ids,
+            Iterable,
+        ):
+            raise TypeError("action_ids must be an iterable of integers.")
+        for action_id in action_ids:
+            if isinstance(action_id, bool) or not isinstance(action_id, int):
+                raise TypeError("action_ids must contain only integers.")
+            if action_id < 1:
+                raise ValueError(
+                    "action_ids must contain positive integers."
+                )
+            if action_id not in clean_action_ids:
+                clean_action_ids.append(action_id)
+
     result = await monitor_graph.ainvoke(
         {
             "recent_actions": [],
+            "actions_to_check": [],
+            "action_ids": clean_action_ids,
             "violations_found": [],
             "actions_blocked": [],
             "alerts_sent": [],

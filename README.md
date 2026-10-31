@@ -9,6 +9,7 @@ This repository is a hiring assessment for TruvanAI, an AI governance platform. 
 - **HITL review:** agents cannot act on high-stakes decisions without human approval.
 - **Preflight gate:** loan requests are verified against trusted PostgreSQL state before any approval or HITL side effect.
 - **User-defined intake:** a signed-in reviewer enters a loan amount in the dashboard, and the trusted intake endpoint writes it to PostgreSQL before the agent runs.
+- **External agent webhook:** a bank's own agent can report an action to `POST /api/events` with an API key, and the monitor returns a verdict without access to the bank's code or database.
 - **Policy enforcement:** the monitor agent detects and blocks violations.
 - **Audit trail:** every agent action is logged permanently with a verdict card of `YES`, `NO`, or `UNKNOWN`.
 - **Real infrastructure:** PostgreSQL, Redis, Groq API, and Gmail SMTP are used directly.
@@ -47,10 +48,12 @@ Runs after every agent action. Enforces two hardcoded policy rules.
 
 | Policy Rule | Triggers when | Action taken |
 |---|---|---|
-| large_loan_no_human_approval | loan_agent auto-approves amount > 1000 | block + Gmail alert |
-| sensitive_data_access | data_agent calls access_sensitive_data | block + Gmail alert |
+| large_loan_no_human_approval | any agent auto-approves amount > 1000 | block + Gmail alert |
+| sensitive_data_access | any agent calls access_sensitive_data | block + Gmail alert |
 
-Flow: scan audit log -> check rules -> violation found -> block action -> send Gmail -> log verdict.
+Flow: scan audit log or receive a webhook event -> check rules -> violation found -> block action -> send Gmail -> log verdict.
+
+The rules are action-based rather than tied to one agent name. The same monitor therefore covers the internal `loan_agent` and `data_agent` and an external `bank_loan_agent` that reports through `POST /api/events`.
 
 ## Architecture
 
@@ -60,6 +63,11 @@ Browser (signed-in reviewer)
     |--> FastAPI Dashboard --> POST /api/loans --> trusted intake
     |                                          --> loan_applications (PostgreSQL)
     |                                          --> Loan Agent
+    |
+External bank agent
+    |
+    |--> POST /api/events (X-API-Key) --> agent_audit_log
+    |                                 --> Monitor Agent
     |
 main.py (orchestrator)
     |
@@ -73,7 +81,7 @@ main.py (orchestrator)
     |--> Data Agent --> read overdue accounts (allowed)
     |               --> access sensitive data (blocked by monitor)
     |
-    |--> Monitor Agent --> reads audit log
+    |--> Monitor Agent --> reads audit log or a webhook event ID
                        --> checks policy rules
                        --> blocks violations
                        --> sends Gmail alert
@@ -82,7 +90,7 @@ main.py (orchestrator)
                     verdict_card: YES / NO / UNKNOWN
 ```
 
-The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same rows that the agents and dashboard write, so the audit trail is both the source of truth and the evidence used for enforcement. The trusted loan table is `loan_applications`; it stores amounts, state, token hashes, and risk flags.
+The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same rows that the agents, dashboard, and external webhook write, so the audit trail is both the source of truth and the evidence used for enforcement. The trusted loan table is `loan_applications`; it stores amounts, state, token hashes, and risk flags.
 
 ## Tech stack
 
@@ -92,6 +100,7 @@ The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same r
 | Model access | Groq API with ChatGroq | Primary and fallback models for summaries and tool-calling configuration |
 | HITL dashboard | FastAPI, Jinja2, WebSockets | Human review of pending loans, trusted intake for user-defined amounts, and live state updates |
 | Dashboard auth | HTTP Basic auth plus signed session cookie | Protect the dashboard and decision endpoints with `HITL_PASSWORD` |
+| External agent integration | `POST /api/events` webhook with `X-API-Key` | Govern a bank's agent without access to its code or database |
 | Audit trail | PostgreSQL, SQLAlchemy async, asyncpg | Permanent agent action records and verdict cards |
 | Trusted loan state | PostgreSQL `loan_applications` | Source of truth for amounts, status, token hashes, and risk flags |
 | Pending queue | Redis | Store requests waiting for a human decision |
@@ -122,6 +131,7 @@ truvanai-poc/
 │   └── init_db.py
 ├── shared/
 │   ├── db.py
+│   ├── events.py
 │   ├── loan_store.py
 │   └── policy.py
 ├── tools/
@@ -176,6 +186,12 @@ GMAIL_RECIPIENT=your_gmail@gmail.com
 HITL_PASSWORD=your_password_here
 # Change this before production deployment
 
+WEBHOOK_API_KEY=your_webhook_api_key_here
+# Shared secret required in the X-API-Key header for POST /api/events
+
+DASHBOARD_URL=http://localhost:8000
+# Base URL used by main.py Scenario 4 to reach the running dashboard
+
 SIMULATE_VIOLATION=true
 # Set to false to skip the data agent violation scenario
 ```
@@ -191,6 +207,8 @@ SIMULATE_VIOLATION=true
 | `GMAIL_APP_PASSWORD` | Sixteen-character Google App Password. This is not the normal Gmail account password. |
 | `GMAIL_RECIPIENT` | Address that receives policy violation alerts. It can be the same as the sender for the demo. |
 | `HITL_PASSWORD` | Password for the dashboard and its decision endpoints. Set a strong value in your environment. |
+| `WEBHOOK_API_KEY` | Shared secret required in the `X-API-Key` header for `POST /api/events`. Set a different value in every environment. |
+| `DASHBOARD_URL` | Dashboard base URL used by `main.py` Scenario 4. The default is `http://localhost:8000`. |
 | `SIMULATE_VIOLATION` | Set to `true` to run the data agent through the blocked sensitive-data path, or `false` for the normal summary path. The tools still use real services in both modes. |
 
 Never commit `.env`. It is ignored by git, and it contains live credentials.
@@ -266,7 +284,7 @@ The local values in `.env.example` already point to these ports. Stop the servic
 
 7. Open [http://localhost:8000](http://localhost:8000) and sign in with the password set via HITL_PASSWORD in your environment. Enter the amount you want to request. Amounts at or below `1000.00` are auto-approved. Larger amounts appear in the Pending column for review.
 
-8. Optional: run the orchestrator in a second terminal to seed the scripted `APP001` and `APP002` demo scenarios.
+8. Optional: run the orchestrator in a second terminal to seed the scripted `APP001` and `APP002` demo scenarios and the external webhook Scenario 4. Keep the dashboard running because Scenario 4 posts to `POST /api/events`.
 
    ```bash
    python main.py
@@ -286,9 +304,54 @@ The API returns only safe fields. It never returns the raw request token. Invali
 
 The dashboard uses only the PostgreSQL amount for routing. Posting a different amount directly to a tool is still blocked by the preflight gate.
 
+### External agent webhook (Approach 2)
+
+The dashboard also exposes a governance webhook for an agent that TruvanAI does not operate. A bank adds one HTTP call after each significant action and never shares its code or database.
+
+1. The bank sends `X-API-Key: <WEBHOOK_API_KEY>` to `POST /api/events`.
+2. The endpoint validates the event and writes it to `agent_audit_log`.
+3. The monitor evaluates that exact event with the same policy rules used for the internal agents.
+4. The response returns `ALLOWED / YES` or `BLOCKED / NO`.
+5. A violation sends a real Gmail alert.
+
+Request:
+
+```bash
+curl -X POST http://localhost:8000/api/events \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: $WEBHOOK_API_KEY" \
+  -d '{
+    "agent": "bank_loan_agent",
+    "action": "auto_approve_loan",
+    "application_id": "EXT-APP-HIGH",
+    "amount": 2500.00,
+    "parameters": {"channel": "external_webhook"}
+  }'
+```
+
+Response:
+
+```json
+{
+  "event_id": 42,
+  "agent": "bank_loan_agent",
+  "action": "auto_approve_loan",
+  "application_id": "EXT-APP-HIGH",
+  "amount": 2500.0,
+  "verdict": "BLOCKED",
+  "verdict_card": "NO",
+  "rules_triggered": ["large_loan_no_human_approval"],
+  "blocked_action_ids": [42],
+  "alerts_sent": 1,
+  "message": "Event 42 was blocked by the monitor agent."
+}
+```
+
+`main.py` Scenario 4 posts a low-value event (allowed) and a high-value event (blocked) to this endpoint. The monitor rules are action-based, so an external agent cannot avoid a rule by using a different agent name.
+
 ## Cloud deployment (Render)
 
-The repository includes `render.yaml`. Set `DATABASE_URL` (internal URL), `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, `GMAIL_RECIPIENT`, and `HITL_PASSWORD` in the Render dashboard. The build command runs `python scripts/init_db.py` automatically.
+The repository includes `render.yaml`. Set `DATABASE_URL` (internal URL), `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, `GMAIL_RECIPIENT`, `HITL_PASSWORD`, and `WEBHOOK_API_KEY` in the Render dashboard. The build command runs `python scripts/init_db.py` automatically.
 
 ## Commit history
 
@@ -307,6 +370,7 @@ The project was built in deliberate commit stages so the governance layers can b
 | 9 | `docs: final README with architecture diagrams and setup guide` | Complete project documentation, Mermaid diagrams, local setup, deployment notes, and placeholder screenshots. |
 | 10 | `fix: prevent duplicate monitor alerts and add health check` | Audit-based deduplication for already handled violations and an unauthenticated `/health` endpoint wired to the Render health check. |
 | 11 | `feat: user-defined loan amount from the dashboard` | Authenticated loan intake, amount validation, automatic approval rendering, and HITL routing for user-defined amounts. |
+| 12 | `feat: external agent webhook and monitor scenario` | `POST /api/events` with `X-API-Key` auth, event-scoped monitor evaluation, action-based policy rules, and Scenario 4. |
 
 ## Diagrams
 
@@ -328,6 +392,8 @@ flowchart TD
     Groq["Groq API"]
     Gmail["Gmail SMTP"]
     File["Approved overdue accounts file"]
+    External["External bank agent"]
+    Webhook["POST /api/events"]
 
     Main --> Loan
     Main --> Data
@@ -342,6 +408,9 @@ flowchart TD
     DataTools --> File
     DataTools --> Groq
     DataTools --> Audit
+    External --> Webhook
+    Webhook --> Audit
+    Webhook --> Monitor
     Monitor --> MonitorTools
     MonitorTools -->|"reads"| Audit
     MonitorTools -->|"blocks"| Audit
@@ -399,6 +468,63 @@ flowchart LR
     Verdict --> Yes["YES<br/>Allowed and completed<br/>Example: auto_approve_loan"]
     Verdict --> No["NO<br/>Blocked by the monitor<br/>Example: access_sensitive_data"]
     Verdict --> Unknown["UNKNOWN<br/>Waiting for a human decision<br/>Example: request_human_approval"]
+```
+
+### Diagram 5 - External Agent Webhook Flow
+
+```mermaid
+sequenceDiagram
+    participant B as Bank's agent
+    participant W as POST /api/events
+    participant D as agent_audit_log
+    participant M as Monitor Agent
+    participant G as Gmail
+
+    B->>W: event + X-API-Key
+    W->>W: validate event
+    W->>D: INSERT ALLOWED / YES
+    W->>M: evaluate that event ID
+    M->>M: apply action-based rules
+    alt amount <= 1000
+        M-->>W: no violation
+        W-->>B: ALLOWED / YES
+    else amount > 1000
+        M->>D: UPDATE BLOCKED / NO
+        M->>G: send violation alert
+        W-->>B: BLOCKED / NO
+    end
+```
+
+Scenario 4 output:
+
+```text
+============================================================
+  SCENARIO 4 - External bank agent webhook
+============================================================
+Dashboard endpoint: http://localhost:8000/api/events
+------------------------------------------------------------
+  Event           : 244
+  Agent           : bank_loan_agent
+  Action          : auto_approve_loan
+  Application     : EXT-APP-LOW
+  Amount          : $750.00
+  Verdict         : ALLOWED
+  Verdict card    : YES
+  Rules triggered : None
+  Alerts sent     : 0
+------------------------------------------------------------
+------------------------------------------------------------
+  Event           : 245
+  Agent           : bank_loan_agent
+  Action          : auto_approve_loan
+  Application     : EXT-APP-HIGH
+  Amount          : $2,500.00
+  Verdict         : BLOCKED
+  Verdict card    : NO
+  Rules triggered : large_loan_no_human_approval
+  Alerts sent     : 1
+------------------------------------------------------------
+Monitor blocked the external action and sent the Gmail alert
 ```
 
 ## Screenshots

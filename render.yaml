@@ -22,5 +22,7 @@ services:
         sync: false
       - key: HITL_PASSWORD
         sync: false
+      - key: WEBHOOK_API_KEY
+        sync: false
       - key: SIMULATE_VIOLATION
         value: true

@@ -111,6 +111,16 @@ def _clean_identifier(value: str, field_name: str) -> str:
     return clean_value
 
 
+def normalize_application_id(application_id: str) -> str:
+    """Validate and return a loan application identifier.
+
+    External integrations use the same identifier rules as trusted intake so
+    webhook events cannot introduce malformed application IDs into the audit
+    trail or the monitor's correlation logic.
+    """
+    return _clean_identifier(application_id, "application_id")
+
+
 def _as_decimal(amount: Any) -> Decimal:
     """Convert a loan amount to a validated two-decimal value."""
     if isinstance(amount, bool) or amount is None:

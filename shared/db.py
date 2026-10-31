@@ -8,7 +8,7 @@ the database helpers exported to agents and the HITL dashboard.
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Iterable, Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 from decimal import Decimal
@@ -302,19 +302,53 @@ async def get_recent_actions(limit: int = 10) -> list[dict[str, Any]]:
     async with get_db_connection() as session:
         rows = (await session.scalars(statement)).all()
 
-    return [
-        {
-            "id": row.id,
-            "agent_name": row.agent_name,
-            "action_name": row.action_name,
-            "parameters": row.parameters,
-            "result": row.result,
-            "policy_status": row.policy_status,
-            "verdict_card": row.verdict_card,
-            "timestamp": row.timestamp.isoformat(),
-        }
-        for row in rows
-    ]
+    return [_audit_row_to_dict(row) for row in rows]
+
+
+def _audit_row_to_dict(row: AgentAuditLog) -> dict[str, Any]:
+    """Convert one audit ORM row into the JSON-ready shape used by the API."""
+    return {
+        "id": row.id,
+        "agent_name": row.agent_name,
+        "action_name": row.action_name,
+        "parameters": row.parameters,
+        "result": row.result,
+        "policy_status": row.policy_status,
+        "verdict_card": row.verdict_card,
+        "timestamp": row.timestamp.isoformat(),
+    }
+
+
+async def get_actions_by_ids(
+    action_ids: Iterable[int],
+) -> list[dict[str, Any]]:
+    """Return specific audit actions by ID, newest first.
+
+    The webhook monitor uses this to evaluate exactly the event it received
+    instead of every row in the recent audit window.
+    """
+    clean_ids: list[int] = []
+    for action_id in action_ids:
+        if isinstance(action_id, bool) or not isinstance(action_id, int):
+            raise TypeError("action_ids must contain only integers.")
+        if action_id < 1:
+            raise ValueError("action_ids must contain positive integers.")
+        if action_id not in clean_ids:
+            clean_ids.append(action_id)
+
+    if not clean_ids:
+        return []
+
+    statement = (
+        select(AgentAuditLog)
+        .where(AgentAuditLog.id.in_(clean_ids))
+        .order_by(AgentAuditLog.timestamp.desc(), AgentAuditLog.id.desc())
+    )
+
+    async with get_db_connection() as session:
+        rows = (await session.scalars(statement)).all()
+
+    return [_audit_row_to_dict(row) for row in rows]
 
 
 async def get_audit_log_table_name() -> str | None:

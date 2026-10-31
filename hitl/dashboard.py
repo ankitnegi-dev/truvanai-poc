@@ -18,6 +18,7 @@ import os
 import secrets
 import time
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, AsyncIterator
@@ -26,6 +27,7 @@ from dotenv import load_dotenv
 from fastapi import (
     Depends,
     FastAPI,
+    Header,
     HTTPException,
     Request,
     WebSocket,
@@ -34,11 +36,16 @@ from fastapi import (
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from redis.asyncio import Redis
 
 from agents.loan_agent import run_loan_application
 from shared.db import get_recent_actions, log_action
+from shared.events import (
+    ExternalEventError,
+    evaluate_external_event,
+    record_external_event,
+)
 from shared.loan_store import (
     IssuedLoanRequest,
     get_loan_application,
@@ -90,6 +97,61 @@ class LoanSubmission(BaseModel):
             raise ValueError("Use no more than two decimal places.") from exc
         if quantized != value:
             raise ValueError("Use no more than two decimal places.")
+        return quantized
+
+
+class ExternalEventRequest(BaseModel):
+    """An action reported by a bank agent through the governance webhook."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str = Field(min_length=1, max_length=120)
+    action: str = Field(min_length=1, max_length=120)
+    application_id: str | None = Field(default=None, max_length=120)
+    amount: Decimal | None = None
+    timestamp: datetime | None = None
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("agent", "action")
+    @classmethod
+    def validate_text(cls, value: str) -> str:
+        """Trim required event text fields."""
+        clean_value = value.strip()
+        if not clean_value:
+            raise ValueError("must be a non-empty string.")
+        return clean_value
+
+    @field_validator("application_id")
+    @classmethod
+    def validate_application_id(cls, value: str | None) -> str | None:
+        """Trim an optional application identifier."""
+        if value is None:
+            return None
+        clean_value = value.strip()
+        if not clean_value:
+            raise ValueError("must be a non-empty string when set.")
+        return clean_value
+
+    @field_validator("amount")
+    @classmethod
+    def validate_amount(cls, value: Decimal | None) -> Decimal | None:
+        """Accept an optional non-negative amount with two decimal places."""
+        if value is None:
+            return None
+        if not value.is_finite() or value < 0:
+            raise ValueError("must be a finite, non-negative amount.")
+        if value > MAX_LOAN_AMOUNT_DECIMAL:
+            raise ValueError(
+                f"amount cannot exceed {MAX_LOAN_AMOUNT_DECIMAL:,.2f}."
+            )
+        try:
+            quantized = value.quantize(CENT)
+        except InvalidOperation as exc:
+            raise ValueError(
+                "must have at most two decimal places."
+            ) from exc
+        if quantized != value:
+            raise ValueError("must have at most two decimal places.")
         return quantized
 
 
@@ -164,6 +226,40 @@ def _hitl_password() -> str:
     if not password:
         raise RuntimeError("HITL_PASSWORD is not set in the environment.")
     return password
+
+
+def _webhook_api_key() -> str:
+    """Return the configured external webhook API key or fail clearly."""
+    api_key = os.getenv("WEBHOOK_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("WEBHOOK_API_KEY is not set in the environment.")
+    return api_key
+
+
+async def require_webhook_auth(
+    x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+) -> None:
+    """Protect the external event endpoint with a shared API key.
+
+    The webhook represents a bank's server, not a human reviewer, so it uses
+    a separate shared secret instead of the dashboard session or Basic auth.
+    """
+    try:
+        expected_api_key = _webhook_api_key()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if x_api_key is None or not hmac.compare_digest(
+        x_api_key.encode("utf-8"),
+        expected_api_key.encode("utf-8"),
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid webhook API key.",
+            headers={
+                "WWW-Authenticate": 'ApiKey realm="TruvanAI Webhook"'
+            },
+        )
 
 
 def _session_signature(expires_at: int, password: str) -> str:
@@ -717,6 +813,56 @@ async def submit_loan(
     payload = _serialize_loan_submission(issued, result)
     await _broadcast_state_safely()
     return payload
+
+
+@app.post("/api/events", status_code=201)
+async def receive_external_event(
+    event: ExternalEventRequest,
+    _auth: None = Depends(require_webhook_auth),
+) -> dict[str, Any]:
+    """Accept an external agent event and return a governance verdict.
+
+    This is the Approach 2 webhook integration: a bank's agent reports an
+    action with one HTTP call, the event enters the same audit trail, and the
+    monitor returns the formal verdict without any access to the bank's code
+    or database.
+    """
+    try:
+        recorded_event = await record_external_event(
+            agent_name=event.agent,
+            action_name=event.action,
+            application_id=event.application_id,
+            amount=event.amount,
+            event_timestamp=event.timestamp,
+            parameters=event.parameters,
+        )
+    except ExternalEventError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Failed to record external agent event.")
+        raise HTTPException(
+            status_code=503,
+            detail="The governance audit trail is temporarily unavailable.",
+        ) from exc
+
+    try:
+        verdict = await evaluate_external_event(recorded_event)
+    except Exception as exc:
+        logger.exception(
+            "Failed to evaluate external agent event %s.",
+            recorded_event.event_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Event {recorded_event.event_id} was recorded, but the "
+                "monitor could not complete the verdict. Check the audit "
+                "trail before retrying."
+            ),
+        ) from exc
+
+    await _broadcast_state_safely()
+    return verdict
 
 
 @app.post("/api/approve/{application_id}")
