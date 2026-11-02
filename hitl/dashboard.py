@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from redis.asyncio import Redis
 
 from agents.loan_agent import run_loan_application
+from ingest.otlp_receiver import router as otlp_router
 from shared.db import get_recent_actions, log_action
 from shared.events import (
     ExternalEventError,
@@ -690,6 +691,10 @@ app = FastAPI(
     openapi_url=None,
 )
 
+# Mount the OTLP ingest router. The /v1/traces route uses its own
+# ingest-key auth and is completely separate from the dashboard auth.
+app.include_router(otlp_router)
+
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict[str, str]:
@@ -763,6 +768,28 @@ async def get_dashboard_state(
         raise HTTPException(
             status_code=503,
             detail="Dashboard data is temporarily unavailable.",
+        ) from exc
+
+
+@app.get("/api/telemetry/stats")
+async def get_telemetry_stats_dashboard(
+    _auth: None = Depends(require_hitl_auth),
+) -> dict[str, Any]:
+    """Return OTel span, trace, and violation counts.
+
+    Protected by the same dashboard auth as all other /api/* routes.
+    Ingest keys are rejected here because this route uses require_hitl_auth,
+    not the ingest-key dependency.
+    """
+    from shared.telemetry_store import telemetry_stats
+
+    try:
+        return await telemetry_stats()
+    except Exception as exc:
+        logger.exception("Failed to retrieve telemetry stats.")
+        raise HTTPException(
+            status_code=503,
+            detail="Telemetry stats are temporarily unavailable.",
         ) from exc
 
 
