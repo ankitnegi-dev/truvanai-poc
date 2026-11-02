@@ -35,6 +35,9 @@ logs/
 # Private build notes
 notes/
 
+# bank_system SQLite database (customer-side local state)
+bank_system/bank.db
+
 # Editors and operating systems
 .idea/
 .vscode/
