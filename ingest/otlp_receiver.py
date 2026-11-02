@@ -365,16 +365,16 @@ async def receive_traces(
             tenant_id,
         )
 
-    # --- call telemetry monitor (hook - Group D will replace this) ----------
+    # --- call telemetry monitor -------------------------------------------
     trace_ids = list({s["trace_id"] for s in spans})
     if trace_ids and inserted > 0:
         try:
-            # GROUP D HOOK: replace this block with the real monitor call.
-            # from agents.telemetry_monitor import evaluate_traces
-            # await evaluate_traces(tenant_id, trace_ids)
-            pass
+            from agents.telemetry_monitor import evaluate_traces
+
+            await evaluate_traces(tenant_id, trace_ids)
         except Exception as exc:
-            # Evaluation errors must not fail ingestion.
+            # Evaluation errors must not fail ingestion. The spans stay
+            # evaluated=false and the sweep command can recover them.
             logger.error(
                 "Telemetry monitor evaluation failed for tenant %s traces %s: %s",
                 tenant_id,

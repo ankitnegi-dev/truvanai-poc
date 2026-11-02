@@ -55,6 +55,7 @@ from shared.loan_store import (
     resolve_hitl_loan,
     restore_hitl_loan,
 )
+from shared.telemetry_store import list_recent_violations
 from shared.policy import (
     HITL_APPROVED_QUEUE,
     HITL_QUEUE,
@@ -354,16 +355,22 @@ def _parse_queue_items(raw_items: list[str]) -> list[dict[str, Any]]:
 
 
 async def _build_dashboard_state() -> dict[str, Any]:
-    """Read pending, resolved, automatic approvals, and recent audit data."""
+    """Read pending, resolved, automatic approvals, audit, and violations."""
     client = get_redis_client()
-    pending_raw, approved_raw, rejected_raw, audit, auto_approved = (
-        await asyncio.gather(
-            client.lrange(PENDING_QUEUE, 0, -1),
-            client.lrange(APPROVED_QUEUE, 0, -1),
-            client.lrange(REJECTED_QUEUE, 0, -1),
-            get_recent_actions(limit=10),
-            get_recent_auto_approved_loans(limit=10),
-        )
+    (
+        pending_raw,
+        approved_raw,
+        rejected_raw,
+        audit,
+        auto_approved,
+        violations,
+    ) = await asyncio.gather(
+        client.lrange(PENDING_QUEUE, 0, -1),
+        client.lrange(APPROVED_QUEUE, 0, -1),
+        client.lrange(REJECTED_QUEUE, 0, -1),
+        get_recent_actions(limit=10),
+        get_recent_auto_approved_loans(limit=10),
+        list_recent_violations(limit=20),
     )
 
     approved = _parse_queue_items(approved_raw)
@@ -384,6 +391,7 @@ async def _build_dashboard_state() -> dict[str, Any]:
         "approved": approved,
         "rejected": _parse_queue_items(rejected_raw),
         "audit": audit,
+        "violations": violations,
     }
 
 
@@ -790,6 +798,27 @@ async def get_telemetry_stats_dashboard(
         raise HTTPException(
             status_code=503,
             detail="Telemetry stats are temporarily unavailable.",
+        ) from exc
+
+
+@app.get("/api/governance/violations")
+async def get_governance_violations(
+    limit: int = 20,
+    _auth: None = Depends(require_hitl_auth),
+) -> list[dict[str, Any]]:
+    """Return recent governance violations detected from telemetry."""
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100.",
+        )
+    try:
+        return await list_recent_violations(limit=limit)
+    except Exception as exc:
+        logger.exception("Failed to retrieve governance violations.")
+        raise HTTPException(
+            status_code=503,
+            detail="Governance violations are temporarily unavailable.",
         ) from exc
 
 
