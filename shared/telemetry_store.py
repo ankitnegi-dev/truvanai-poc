@@ -40,7 +40,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, mapped_column
 
-from shared.db import Base, get_db_connection, get_engine
+from shared.db import AgentAuditLog, Base, get_db_connection, get_engine
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(PROJECT_ROOT / ".env")
@@ -516,6 +516,44 @@ async def get_unevaluated_trace_ids(tenant_id: str) -> list[str]:
     async with get_db_connection() as session:
         rows = (await session.scalars(stmt)).all()
     return list(rows)
+
+
+async def get_tenants_with_unevaluated_spans() -> list[str]:
+    """Return tenant IDs that still have at least one unevaluated span."""
+    stmt = (
+        select(TelemetrySpan.tenant_id)
+        .where(TelemetrySpan.evaluated.is_(False))
+        .distinct()
+    )
+    async with get_db_connection() as session:
+        rows = (await session.scalars(stmt)).all()
+    return sorted(str(row) for row in rows)
+
+
+async def has_governance_audit(
+    tenant_id: str,
+    trace_id: str,
+    action_name: str,
+) -> bool:
+    """Return True when the monitor already wrote this trace action.
+
+    The governance_violations unique constraint covers violations. This
+    helper gives the compliant ALLOWED / YES path the same idempotency, so a
+    repeated evaluation cannot append a second governance_check_passed row.
+    """
+    stmt = (
+        select(AgentAuditLog.id)
+        .where(
+            AgentAuditLog.agent_name == "truvanai_monitor",
+            AgentAuditLog.action_name == action_name,
+            AgentAuditLog.parameters["tenant_id"].astext == tenant_id,
+            AgentAuditLog.parameters["trace_id"].astext == trace_id,
+        )
+        .limit(1)
+    )
+    async with get_db_connection() as session:
+        row = await session.scalar(stmt)
+    return row is not None
 
 
 # ---------------------------------------------------------------------------
