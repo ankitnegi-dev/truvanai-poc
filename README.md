@@ -101,6 +101,7 @@ The physical PostgreSQL table is `agent_audit_log`. The monitor reads the same r
 | HITL dashboard | FastAPI, Jinja2, WebSockets | Human review of pending loans, trusted intake for user-defined amounts, and live state updates |
 | Dashboard auth | HTTP Basic auth plus signed session cookie | Protect the dashboard and decision endpoints with `HITL_PASSWORD` |
 | External agent integration | `POST /api/events` webhook with `X-API-Key` | Govern a bank's agent without access to its code or database |
+| Agent telemetry | OpenTelemetry SDK and OTLP/HTTP protobuf | Bank-side spans received through `POST /v1/traces` |
 | Audit trail | PostgreSQL, SQLAlchemy async, asyncpg | Permanent agent action records and verdict cards |
 | Trusted loan state | PostgreSQL `loan_applications` | Source of truth for amounts, status, token hashes, and risk flags |
 | Pending queue | Redis | Store requests waiting for a human decision |
@@ -117,23 +118,38 @@ truvanai-poc/
 ├── agents/
 │   ├── data_agent.py
 │   ├── loan_agent.py
-│   └── monitor_agent.py
+│   ├── monitor_agent.py
+│   └── telemetry_monitor.py
+├── bank_system/
+│   ├── agent.py
+│   ├── config.py
+│   ├── run.py
+│   ├── store.py
+│   └── telemetry.py
 ├── data/
 │   └── overdue_accounts/
 │       └── accounts.txt
+├── docs/
+│   └── OTEL_CONTRACT.md
 ├── hitl/
 │   ├── dashboard.py
 │   └── templates/
 │       └── dashboard.html
 ├── infra/
 │   └── docker-compose.yml
+├── ingest/
+│   ├── __init__.py
+│   └── otlp_receiver.py
 ├── scripts/
-│   └── init_db.py
+│   ├── create_ingest_key.py
+│   ├── init_db.py
+│   └── verify_otel_flow.py
 ├── shared/
 │   ├── db.py
 │   ├── events.py
 │   ├── loan_store.py
-│   └── policy.py
+│   ├── policy.py
+│   └── telemetry_store.py
 ├── tools/
 │   ├── data_tools.py
 │   ├── loan_tools.py
@@ -349,6 +365,146 @@ Response:
 
 `main.py` Scenario 4 posts a low-value event (allowed) and a high-value event (blocked) to this endpoint. The monitor rules are action-based, so an external agent cannot avoid a rule by using a different agent name.
 
+## OpenTelemetry integration
+
+TruvanAI can govern a bank agent that it did not write and cannot modify. The bank adds the OpenTelemetry SDK to its agent and sends spans to TruvanAI over OTLP/HTTP. TruvanAI reads the spans, compares them with the policy stored in `tenant_policies`, writes a verdict, and alerts the bank owner.
+
+The integration is additive. It does not change the internal loan agent, the preflight gate, or the existing dashboard routes.
+
+### How a trace is governed
+
+```mermaid
+sequenceDiagram
+    participant Bank as Bank loan agent
+    participant Receiver as OTLP receiver
+    participant DB as PostgreSQL
+    participant Monitor as Telemetry monitor
+    participant Audit as Audit trail
+    participant Mail as Gmail SMTP
+    participant User as Dashboard user
+
+    Bank->>Receiver: POST /v1/traces with ingest key
+    Receiver->>DB: store spans, tenant resolved from the key
+    Receiver->>Monitor: evaluate_traces(tenant_id, trace_ids)
+    Monitor->>DB: load spans and tenant_policies
+    Monitor->>Monitor: apply R0, R1, R2, and compliant path
+    Monitor->>DB: insert governance_violations row
+    Monitor->>Audit: governance_violation_detected or governance_check_passed
+    Monitor->>Mail: send governance alert when ALERTS_ENABLED=true
+    User->>DB: dashboard calls GET /api/governance/violations
+    DB-->>User: panel shows verdict, alert, and containment status
+```
+
+### Decision rules
+
+The telemetry monitor is a deterministic LangGraph `StateGraph` with no language model. The node order is `load_spans -> load_policy -> evaluate_rules -> write_verdicts -> notify -> END`. The approval threshold comes only from `tenant_policies`. A threshold attribute in a span is ignored.
+
+```mermaid
+flowchart TD
+    Start["Decision span has loan.decision"] --> R0{"Missing loan.amount or loan.application_id?"}
+    R0 -- Yes --> A0["R0_insufficient_evidence<br/>PENDING / UNKNOWN"]
+    R0 -- No --> R1{"AUTO_APPROVED and amount > tenant_policies threshold?"}
+    R1 -- Yes --> A1["R1_high_value_auto_approval<br/>BLOCKED / NO, HIGH"]
+    R1 -- No --> R2{"loan.amount differs across the trace?"}
+    R2 -- Yes --> A2["R2_amount_inconsistent_in_trace<br/>BLOCKED / NO, HIGH"]
+    R2 -- No --> OK["Compliant decision<br/>ALLOWED / YES"]
+    A0 --> Done["Write verdict, audit row, and alert"]
+    A1 --> Done
+    A2 --> Done
+    OK --> Done
+```
+
+| Rule | Condition | Audit verdict | Severity |
+| --- | --- | --- | --- |
+| R0 insufficient evidence | A decision span is missing `loan.amount` or `loan.application_id` | `PENDING / UNKNOWN` | MEDIUM |
+| R1 high value auto approval | `loan.decision` is `AUTO_APPROVED` and the amount is above the tenant policy threshold | `BLOCKED / NO` | HIGH |
+| R2 amount inconsistent in trace | `loan.amount` differs across spans of one trace | `BLOCKED / NO` | HIGH |
+| Compliant | A complete decision span breaks no rule | `ALLOWED / YES` | NONE |
+
+R1 and R2 can fire on the same trace. Each rule writes its own row and sends its own alert.
+
+Violations are stored in `governance_violations` with a unique key on `(tenant_id, trace_id, rule)`. A repeated delivery writes no second violation and sends no second alert. Compliant decisions write `governance_check_passed` and are idempotent as well.
+
+The audit row uses agent name `truvanai_monitor` and action `governance_violation_detected`. Its parameters include `tenant_id`, `trace_id`, `span_id`, `application_id`, amount, threshold, rule, severity, reason, and `enforcement="detected_after_execution"`.
+
+### Alerts
+
+`tools/notify.py` sends a real Gmail message through SMTP with the subject:
+
+`TruvanAI Governance Alert: Policy Violation in Bank Telemetry`
+
+The body includes the tenant, loan id, amount, threshold, rule, reason, and what TruvanAI did. `ALERTS_ENABLED=false` records `alert_status="disabled"` and sends no mail. This is the switch used by the verifier so tests do not send email. When SMTP fails, the violation stores `alert_error` and ingestion continues.
+
+Render free instances block outbound SMTP, so Gmail alerts only send from a local run. The dashboard and verdicts still work on Render.
+
+### Run steps
+
+1. Start PostgreSQL and Redis, then create the tables.
+
+   ```cmd
+   docker compose -f infra/docker-compose.yml up -d
+   python scripts/init_db.py
+   ```
+
+2. Create an ingest key for the seeded `bank-demo` tenant. The raw key is printed once.
+
+   ```cmd
+   python scripts/create_ingest_key.py bank-demo
+   ```
+
+3. Start the dashboard and OTLP receiver.
+
+   ```cmd
+   python -m uvicorn hitl.dashboard:app --port 8000
+   ```
+
+4. In a second terminal, point the bank agent at TruvanAI and run a bad configuration.
+
+   ```cmd
+   set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8000
+   set OTEL_EXPORTER_OTLP_HEADERS=x-truvanai-api-key=<KEY>
+   set BANK_APPROVAL_THRESHOLD=10000
+   python -m bank_system.run --amount 2000
+   ```
+
+   The SDK appends `/v1/traces` to the base endpoint. The bank agent auto-approves a 2000 loan because its own threshold is 10000. TruvanAI compares the decision with the tenant policy threshold of 1000, writes `BLOCKED / NO`, stores rule `R1_high_value_auto_approval`, and sends the Gmail alert when alerts are enabled.
+
+5. Open the dashboard and check the panel `Governance violations from telemetry`. The panel shows time, tenant, application, amount, threshold, rule, reason, alert status, and containment status. It refreshes with the existing WebSocket cycle.
+
+6. Recovery: evaluate any span that was stored while the monitor was unavailable.
+
+   ```cmd
+   python -m agents.telemetry_monitor --sweep
+   ```
+
+### Manual demo
+
+```cmd
+docker compose -f infra/docker-compose.yml up -d
+python scripts/init_db.py
+python scripts/create_ingest_key.py bank-demo
+python -m uvicorn hitl.dashboard:app --port 8000
+```
+
+In a second terminal, copy the key printed above:
+
+```cmd
+set OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:8000
+set OTEL_EXPORTER_OTLP_HEADERS=x-truvanai-api-key=<KEY>
+set BANK_APPROVAL_THRESHOLD=10000
+python -m bank_system.run --amount 2000
+```
+
+Then open the dashboard panel and check the Gmail alert. To run the same demo without email, add `set ALERTS_ENABLED=false` before the bank command. The violation will show `alert_status="disabled"`.
+
+### Limitations
+
+- Detection is after execution. The bank agent has already approved the loan when TruvanAI sees the span. The monitor records and alerts; it cannot undo the decision in this POC. Group F containment would need a control API exposed by the bank.
+- Currency is not converted or compared. The policy currency is shown in alerts, but the POC does not perform exchange-rate checks.
+- Render free instances block outbound SMTP. Run the alert demo locally.
+- TruvanAI uses a native FastAPI receiver instead of an OpenTelemetry Collector. That keeps the POC small. A production deployment would put a Collector in front for batching, retries, and buffering.
+- The receiver keeps only scalar span attributes and truncates string values to 500 characters.
+
 ## Cloud deployment (Render)
 
 The repository includes `render.yaml`. Set `DATABASE_URL` (internal URL), `REDIS_URL`, `GROQ_API_KEY`, `GMAIL_SENDER`, `GMAIL_APP_PASSWORD`, `GMAIL_RECIPIENT`, `HITL_PASSWORD`, and `WEBHOOK_API_KEY` in the Render dashboard. The build command runs `python scripts/init_db.py` automatically.
@@ -371,6 +527,8 @@ The project was built in deliberate commit stages so the governance layers can b
 | 10 | `fix: prevent duplicate monitor alerts and add health check` | Audit-based deduplication for already handled violations and an unauthenticated `/health` endpoint wired to the Render health check. |
 | 11 | `feat: user-defined loan amount from the dashboard` | Authenticated loan intake, amount validation, automatic approval rendering, and HITL routing for user-defined amounts. |
 | 12 | `feat: external agent webhook and monitor scenario` | `POST /api/events` with `X-API-Key` auth, event-scoped monitor evaluation, action-based policy rules, and Scenario 4. |
+| 13 | `feat: add telemetry monitor verdicts and dashboard panel` | Deterministic LangGraph telemetry monitor, R0/R1/R2 rules, idempotent verdicts, governance alerts, violations API, and dashboard panel. |
+| 14 | `feat: add OpenTelemetry flow verifier and docs` | End-to-end verifier with 17 checks, OpenTelemetry README section, diagrams, run steps, and limitations. |
 
 ## Diagrams
 
