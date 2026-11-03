@@ -35,8 +35,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 from decimal import Decimal, InvalidOperation
 from typing import Any, TypedDict
+
+import httpx
 
 from langgraph.graph import END, START, StateGraph
 
@@ -51,6 +54,7 @@ from shared.telemetry_store import (
     mark_evaluated,
     record_violation,
     update_violation_alert,
+    update_violation_containment,
 )
 from tools.notify import alerts_enabled, send_governance_alert
 
@@ -60,11 +64,13 @@ AGENT_NAME = "truvanai_monitor"
 VIOLATION_ACTION = "governance_violation_detected"
 COMPLIANT_ACTION = "governance_check_passed"
 ENFORCEMENT = "detected_after_execution"
+CONTAINMENT_ACTION = "containment_action"
 
 RULE_R0 = "R0_insufficient_evidence"
 RULE_R1 = "R1_high_value_auto_approval"
 RULE_R2 = "R2_amount_inconsistent_in_trace"
 RULE_COMPLIANT = "compliant_decision"
+CONTAINMENT_RULES = frozenset({RULE_R1, RULE_R2})
 
 DECISION_AUTO_APPROVED = "AUTO_APPROVED"
 DECISION_SENT_TO_HITL = "SENT_TO_HITL"
@@ -83,6 +89,7 @@ class TelemetryState(TypedDict, total=False):
     spans: list[dict[str, Any]]
     policy: dict[str, Any] | None
     owner_email: str | None
+    control_url: str | None
     verdicts: list[dict[str, Any]]
     new_violations: list[dict[str, Any]]
     compliant_checks: int
@@ -226,6 +233,7 @@ async def load_policy(state: TelemetryState) -> dict[str, Any]:
     return {
         "policy": policy,
         "owner_email": tenant["owner_email"] if tenant else None,
+        "control_url": tenant["control_url"] if tenant else None,
     }
 
 
@@ -440,6 +448,64 @@ async def evaluate_rules(state: TelemetryState) -> dict[str, Any]:
     return {"verdicts": verdicts}
 
 
+async def _attempt_containment(
+    violation_id: int,
+    verdict: dict[str, Any],
+    control_url: str | None,
+) -> None:
+    """Call the tenant control URL for an R1 or R2 violation.
+
+    The containment status on the violation row is updated to requested,
+    then succeeded or failed. A missing URL or secret leaves the row as
+    not_configured and writes no containment audit row.
+    """
+    secret = os.getenv("BANK_CONTROL_SECRET", "").strip()
+    application_id = verdict.get("application_id")
+
+    if not control_url or not secret or not application_id:
+        await update_violation_containment(violation_id, "not_configured")
+        return
+
+    await update_violation_containment(violation_id, "requested")
+
+    url = control_url.rstrip("/") + "/control/hold/" + str(application_id)
+    status = "failed"
+    error: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                url,
+                headers={"x-bank-control-secret": secret},
+            )
+        if 200 <= response.status_code < 300:
+            status = "succeeded"
+        else:
+            error = f"HTTP {response.status_code}: {response.text[:500]}"
+    except Exception as exc:  # noqa: BLE001 - containment must not abort verdicts
+        error = str(exc)[:500]
+
+    await update_violation_containment(violation_id, status)
+    await log_action(
+        agent_name=AGENT_NAME,
+        action_name=CONTAINMENT_ACTION,
+        parameters={
+            "tenant_id": verdict["tenant_id"],
+            "trace_id": verdict["trace_id"],
+            "application_id": application_id,
+            "control_url": control_url,
+            "rule": verdict["rule"],
+            "containment_status": status,
+            "error": error,
+        },
+        result=(
+            f"Containment {status} for {application_id}."
+            + (f" Error: {error}" if error else "")
+        ),
+        policy_status="ALLOWED",
+        verdict_card="YES",
+    )
+
+
 async def write_verdicts(state: TelemetryState) -> dict[str, Any]:
     """Persist violations and compliant checks, then mark spans evaluated.
 
@@ -483,6 +549,16 @@ async def write_verdicts(state: TelemetryState) -> dict[str, Any]:
                 policy_status=verdict["policy_status"],
                 verdict_card=verdict["verdict_card"],
             )
+
+            # Containment runs only for R1 and R2 and only when the tenant
+            # exposes a control URL and a shared secret is configured.
+            if verdict["rule"] in CONTAINMENT_RULES:
+                await _attempt_containment(
+                    violation_id=violation_id,
+                    verdict=verdict,
+                    control_url=state.get("control_url"),
+                )
+
             new_violations.append({**verdict, "violation_id": violation_id})
             continue
 
@@ -666,6 +742,7 @@ async def evaluate_traces(
             "spans": [],
             "policy": None,
             "owner_email": None,
+            "control_url": None,
             "verdicts": [],
             "new_violations": [],
             "compliant_checks": 0,

@@ -51,9 +51,19 @@ def insert_loan(application_id: str, amount: float) -> None:
 
 
 def update_loan_status(application_id: str, status: str) -> None:
-    """Update a loan's status and set decided_at to now."""
+    """Update a loan's status and set decided_at to now.
+
+    A loan that has been moved to ON_HOLD_FOR_REVIEW by a containment
+    callback is not overwritten by a later agent status update.
+    """
     now = datetime.now(timezone.utc).isoformat()
     with _connect() as conn:
+        current = conn.execute(
+            "SELECT status FROM loans WHERE application_id = ?",
+            (application_id,),
+        ).fetchone()
+        if current is not None and current["status"] == "ON_HOLD_FOR_REVIEW":
+            return
         conn.execute(
             "UPDATE loans SET status = ?, decided_at = ? "
             "WHERE application_id = ?",

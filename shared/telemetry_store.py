@@ -615,6 +615,21 @@ async def update_violation_alert(
         await session.commit()
 
 
+async def update_violation_containment(
+    violation_id: int,
+    containment_status: str,
+) -> None:
+    """Update the containment status of an existing violation row."""
+    stmt = (
+        update(GovernanceViolation)
+        .where(GovernanceViolation.id == violation_id)
+        .values(containment_status=containment_status)
+    )
+    async with get_db_connection() as session:
+        await session.execute(stmt)
+        await session.commit()
+
+
 async def list_recent_violations(
     limit: int = 20,
     tenant_id: str | None = None,

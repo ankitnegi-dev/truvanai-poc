@@ -123,6 +123,7 @@ truvanai-poc/
 ├── bank_system/
 │   ├── agent.py
 │   ├── config.py
+│   ├── control.py
 │   ├── run.py
 │   ├── store.py
 │   └── telemetry.py
@@ -436,6 +437,26 @@ The audit row uses agent name `truvanai_monitor` and action `governance_violatio
 The body includes the tenant, loan id, amount, threshold, rule, reason, and what TruvanAI did. `ALERTS_ENABLED=false` records `alert_status="disabled"` and sends no mail. This is the switch used by the verifier so tests do not send email. When SMTP fails, the violation stores `alert_error` and ingestion continues.
 
 Render free instances block outbound SMTP, so Gmail alerts only send from a local run. The dashboard and verdicts still work on Render.
+
+### Containment (Group F, optional)
+
+When a tenant exposes a control URL, TruvanAI can ask the bank to hold an
+auto-approved loan after an R1 or R2 violation. The bank system simulates
+this with `bank_system/control.py`:
+
+```cmd
+set BANK_CONTROL_SECRET=change-me
+python -m uvicorn bank_system.control:app --port 8090
+```
+
+The tenant policy must store the control URL, for example
+`http://localhost:8090`. The same secret must be set in the TruvanAI
+environment as `BANK_CONTROL_SECRET`. After a violation the monitor posts to
+`POST /control/hold/{application_id}` with the header
+`x-bank-control-secret`. The loan moves to `ON_HOLD_FOR_REVIEW`, the
+violation row stores `containment_status` of `succeeded` or `failed`, and the
+monitor writes a `containment_action` audit row. When no control URL or
+secret is configured the status stays `not_configured` and no call is made.
 
 ### Run steps
 
