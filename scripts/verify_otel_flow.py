@@ -38,10 +38,11 @@ from dotenv import load_dotenv
 load_dotenv(PROJECT_ROOT / ".env")
 os.environ["ALERTS_ENABLED"] = "false"
 os.environ.setdefault("PYTHONUNBUFFERED", "1")
+os.environ["BANK_CONTROL_SECRET"] = "verify-containment-secret"
 
 import httpx
 import uvicorn
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from shared.db import AgentAuditLog, get_db_connection
 from shared.telemetry_store import (
@@ -286,7 +287,34 @@ def oversized_status(port: int, key: str) -> int | None:
 # ---------------------------------------------------------------------------
 
 
+async def set_tenant_control_url(control_url: str) -> None:
+    async with get_db_connection() as session:
+        await session.execute(
+            update(Tenant)
+            .where(Tenant.tenant_id == TENANT)
+            .values(control_url=control_url)
+        )
+        await session.commit()
+
+
 async def cleanup_tenant_data() -> None:
+    async with get_db_connection() as session:
+        await session.execute(
+            delete(GovernanceViolation).where(
+                GovernanceViolation.tenant_id == TENANT
+            )
+        )
+        await session.execute(
+            delete(TelemetrySpan).where(TelemetrySpan.tenant_id == TENANT)
+        )
+        await session.execute(
+            delete(IngestKey).where(IngestKey.tenant_id == TENANT)
+        )
+        await session.execute(
+            delete(TenantPolicy).where(TenantPolicy.tenant_id == TENANT)
+        )
+        await session.execute(delete(Tenant).where(Tenant.tenant_id == TENANT))
+        await session.commit()
     async with get_db_connection() as session:
         await session.execute(
             delete(GovernanceViolation).where(
@@ -898,6 +926,91 @@ def main() -> int:
                     f"{sorted({row.alert_status for row in violations})}"
                 ),
             )
+
+        # 18. Containment callback (Group F).
+        import bank_system.control as bank_control_module
+        from bank_system.store import get_loan, init_store
+
+        init_store()
+        bank_control_port = free_port()
+        bank_control_config = uvicorn.Config(
+            bank_control_module.app,
+            host="127.0.0.1",
+            port=bank_control_port,
+            log_level="warning",
+            lifespan="off",
+        )
+        bank_control_server = uvicorn.Server(bank_control_config)
+        bank_control_thread = threading.Thread(
+            target=bank_control_server.run, daemon=True
+        )
+        bank_control_thread.start()
+        for _ in range(200):
+            if bank_control_server.started:
+                break
+            time.sleep(0.05)
+
+        server.run(set_tenant_control_url(
+            f"http://127.0.0.1:{bank_control_port}"
+        ))
+
+        application = f"VERIFY-CONTAIN-{hex_id(6)}"
+        env = os.environ.copy()
+        env["OTEL_EXPORTER_OTLP_ENDPOINT"] = base_url
+        env["OTEL_EXPORTER_OTLP_HEADERS"] = f"x-truvanai-api-key={key}"
+        env["BANK_APPROVAL_THRESHOLD"] = "10000"
+        env["ALERTS_ENABLED"] = "false"
+        env["BANK_CONTROL_SECRET"] = "verify-containment-secret"
+
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "bank_system.run",
+                "--amount",
+                "2000",
+                "--id",
+                application,
+            ],
+            cwd=str(PROJECT_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        time.sleep(1.0)
+
+        state = server.run(trace_state(server.run(trace_id_for(application))))
+        r1 = violation_by_rule(state, "R1")
+        loan = get_loan(application)
+        containment_audit = next(
+            (
+                audit
+                for audit in state["audits"]
+                if audit.action_name == "containment_action"
+            ),
+            None,
+        )
+        record(
+            18,
+            "containment callback succeeds for R1",
+            completed.returncode == 0
+            and r1 is not None
+            and r1.containment_status == "succeeded"
+            and loan is not None
+            and loan["status"] == "ON_HOLD_FOR_REVIEW"
+            and containment_audit is not None,
+            (
+                f"exit={completed.returncode}, "
+                f"containment={getattr(r1, 'containment_status', None)}, "
+                f"loan={loan['status'] if loan else None}, "
+                f"audit={containment_audit is not None}"
+            ),
+        )
+
+        bank_control_server.should_exit = True
+        bank_control_thread.join(timeout=10)
 
         # 17. Existing verifiers.
         check_existing_verifiers()
