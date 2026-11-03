@@ -933,6 +933,42 @@
       text-align: center;
     }
 
+    .telemetry-panel .audit-table {
+      min-width: 1080px;
+    }
+
+    .telemetry-panel .audit-table td {
+      vertical-align: top;
+      white-space: normal;
+    }
+
+    .telemetry-tenant,
+    .telemetry-application {
+      color: var(--color-text-primary);
+      font-weight: 550;
+    }
+
+    .telemetry-amount {
+      color: var(--color-text-primary);
+      font-family: var(--font-mono);
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+
+    .telemetry-rule {
+      font-family: var(--font-mono);
+      font-size: 10px;
+      white-space: nowrap;
+    }
+
+    .telemetry-reason {
+      display: block;
+      min-width: 260px;
+      max-width: 420px;
+      color: var(--color-text-secondary);
+      line-height: 1.45;
+    }
+
     .toast-region {
       position: fixed;
       right: 22px;
@@ -1288,6 +1324,39 @@
         </section>
       </section>
 
+      <section class="audit-panel telemetry-panel" aria-labelledby="telemetryViolationsHeading">
+        <div class="audit-header">
+          <div>
+            <p class="eyebrow">OpenTelemetry</p>
+            <h2 id="telemetryViolationsHeading">Governance violations from telemetry</h2>
+          </div>
+          <span class="audit-limit">Newest 20</span>
+        </div>
+        <div class="table-wrap">
+          <table class="audit-table">
+            <caption class="sr-only">Recent governance violations detected from OpenTelemetry spans</caption>
+            <thead>
+              <tr>
+                <th scope="col">Time</th>
+                <th scope="col">Tenant</th>
+                <th scope="col">Application</th>
+                <th scope="col">Amount</th>
+                <th scope="col">Threshold</th>
+                <th scope="col">Rule</th>
+                <th scope="col">Reason</th>
+                <th scope="col">Alert</th>
+                <th scope="col">Contained</th>
+              </tr>
+            </thead>
+            <tbody id="violationsBody">
+              <tr>
+                <td class="table-empty" colspan="9">Loading telemetry violations</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
       <section class="audit-panel" aria-labelledby="auditHeading">
         <div class="audit-header">
           <div>
@@ -1342,6 +1411,7 @@
         rejectedCount: document.getElementById("rejectedCount"),
         navPendingCount: document.getElementById("navPendingCount"),
         auditBody: document.getElementById("auditBody"),
+        violationsBody: document.getElementById("violationsBody"),
         liveChip: document.getElementById("liveChip"),
         liveLabel: document.getElementById("liveLabel"),
         lastUpdated: document.getElementById("lastUpdated"),
@@ -1371,6 +1441,10 @@
         hour: "numeric",
         minute: "2-digit",
         second: "2-digit"
+      });
+      const telemetryNumberFormatter = new Intl.NumberFormat(undefined, {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
       });
       const updatedAtFormatter = new Intl.DateTimeFormat(undefined, {
         hour: "numeric",
@@ -1409,6 +1483,17 @@
           return "Unavailable";
         }
         return currencyFormatter.format(amount);
+      }
+
+      function formatTelemetryNumber(value) {
+        if (value === null || value === undefined || value === "") {
+          return "Unknown";
+        }
+        const amount = Number(value);
+        if (!Number.isFinite(amount)) {
+          return "Unknown";
+        }
+        return telemetryNumberFormatter.format(amount);
       }
 
       function formatCardTime(value) {
@@ -1580,16 +1665,65 @@
         }).join("");
       }
 
+      function alertBadgeClass(status) {
+        if (status === "sent") {
+          return "table-badge--allowed";
+        }
+        if (status === "failed") {
+          return "table-badge--blocked";
+        }
+        return "table-badge--pending";
+      }
+
+      function containmentBadgeClass(status) {
+        if (status === "succeeded") {
+          return "table-badge--allowed";
+        }
+        if (status === "failed") {
+          return "table-badge--blocked";
+        }
+        return "table-badge--pending";
+      }
+
+      function renderViolations(violations) {
+        if (!Array.isArray(violations) || violations.length === 0) {
+          refs.violationsBody.innerHTML = `
+            <tr>
+              <td class="table-empty" colspan="9">No telemetry violations detected</td>
+            </tr>`;
+          return;
+        }
+
+        refs.violationsBody.innerHTML = violations.map((violation) => {
+          const alertStatus = String(violation.alert_status || "pending").toLowerCase();
+          const containment = String(violation.containment_status || "not_configured").toLowerCase();
+          return `
+            <tr>
+              <td><span class="audit-time">${escapeHtml(formatAuditTime(violation.detected_at))}</span></td>
+              <td><span class="telemetry-tenant">${escapeHtml(violation.tenant_id || "unknown")}</span></td>
+              <td><span class="telemetry-application">${escapeHtml(violation.application_id || "Unknown")}</span></td>
+              <td><span class="telemetry-amount">${escapeHtml(formatTelemetryNumber(violation.amount))}</span></td>
+              <td><span class="telemetry-amount">${escapeHtml(formatTelemetryNumber(violation.threshold))}</span></td>
+              <td><span class="telemetry-rule">${escapeHtml(violation.rule || "unknown")}</span></td>
+              <td><span class="telemetry-reason">${escapeHtml(violation.reason || "")}</span></td>
+              <td><span class="table-badge ${alertBadgeClass(alertStatus)}">${escapeHtml(titleCase(alertStatus))}</span></td>
+              <td><span class="table-badge ${containmentBadgeClass(containment)}">${escapeHtml(titleCase(containment))}</span></td>
+            </tr>`;
+        }).join("");
+      }
+
       function applyState(nextState) {
         const pending = Array.isArray(nextState.pending) ? nextState.pending : [];
         const approved = Array.isArray(nextState.approved) ? nextState.approved : [];
         const rejected = Array.isArray(nextState.rejected) ? nextState.rejected : [];
         const audit = Array.isArray(nextState.audit) ? nextState.audit : [];
+        const violations = Array.isArray(nextState.violations) ? nextState.violations : [];
 
         renderColumn(pending, "pending", refs.pendingList, refs.pendingEmpty, refs.pendingCount);
         renderColumn(approved, "approved", refs.approvedList, refs.approvedEmpty, refs.approvedCount);
         renderColumn(rejected, "rejected", refs.rejectedList, refs.rejectedEmpty, refs.rejectedCount);
         renderAudit(audit);
+        renderViolations(violations);
 
         refs.navPendingCount.textContent = String(pending.length);
         refs.lastUpdated.textContent = `Updated ${updatedAtFormatter.format(new Date())}`;

@@ -28,7 +28,23 @@ SMTP_PORT = 587
 ALERT_SUBJECT = (
     "TruvanAI - AI Governance Alert: Policy Violation Detected"
 )
+GOVERNANCE_ALERT_SUBJECT = (
+    "TruvanAI Governance Alert: Policy Violation in Bank Telemetry"
+)
 AGENT_NAME = "monitor_agent"
+
+
+def alerts_enabled() -> bool:
+    """Return False when ALERTS_ENABLED is explicitly disabled."""
+    value = os.getenv("ALERTS_ENABLED", "true").strip().lower()
+    return value not in {"0", "false", "no", "off"}
+
+
+def _format_money(value: float | None, currency: str) -> str:
+    """Format an amount for an alert body."""
+    if value is None:
+        return "Unknown"
+    return f"{currency} {value:,.2f}"
 
 
 def send_email(to: str, subject: str, body: str) -> None:
@@ -161,3 +177,87 @@ async def send_gmail_alert(violation_details: dict[str, Any]) -> str:
         verdict_card="YES",
     )
     return confirmation
+
+
+async def send_governance_alert(
+    recipient: str,
+    tenant_id: str,
+    application_id: str | None,
+    amount: float | None,
+    threshold: float | None,
+    currency: str,
+    rule: str,
+    reason: str,
+    policy_status: str,
+    verdict_card: str,
+    containment_status: str = "not_configured",
+) -> str:
+    """Send a governance alert for a telemetry violation.
+
+    The telemetry monitor calls this after it has written the verdict and the
+    governance_violations row. SMTP errors are raised to the caller so the
+    monitor can save alert_error and continue.
+    """
+    if not alerts_enabled():
+        raise RuntimeError("ALERTS_ENABLED is false.")
+
+    if not isinstance(recipient, str) or not recipient.strip():
+        raise ValueError("Alert recipient must be a non-empty string.")
+    if not isinstance(tenant_id, str) or not tenant_id.strip():
+        raise ValueError("tenant_id must be a non-empty string.")
+    if not isinstance(rule, str) or not rule.strip():
+        raise ValueError("rule must be a non-empty string.")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason must be a non-empty string.")
+
+    clean_currency = currency.strip().upper() if currency else "INR"
+    clean_status = policy_status.strip().upper()
+    clean_verdict = verdict_card.strip().upper()
+    loan_id = application_id or "Unknown"
+    amount_text = _format_money(amount, clean_currency)
+    threshold_text = _format_money(threshold, clean_currency)
+
+    if clean_status == "BLOCKED":
+        action_text = (
+            "TruvanAI detected the violation after the bank agent executed "
+            "the action and recorded BLOCKED / NO in the governance audit "
+            "trail."
+        )
+    else:
+        action_text = (
+            "TruvanAI could not verify the policy because evidence was "
+            "missing and recorded PENDING / UNKNOWN in the governance audit "
+            "trail."
+        )
+
+    body = "\n".join(
+        [
+            "---",
+            "TruvanAI Governance Alert",
+            "",
+            "A policy violation was detected in bank telemetry.",
+            "",
+            f"Tenant: {tenant_id.strip()}",
+            f"Loan: {loan_id}",
+            f"Amount: {amount_text}",
+            f"Policy threshold: {threshold_text}",
+            f"Rule: {rule.strip()}",
+            f"Reason: {reason.strip()}",
+            f"Verdict: {clean_status} / {clean_verdict}",
+            "",
+            "What TruvanAI did:",
+            f"- {action_text}",
+            f"- Containment status: {containment_status}",
+            "",
+            "- TruvanAI Governance System",
+            "---",
+        ]
+    )
+
+    await asyncio.to_thread(
+        send_email,
+        recipient.strip(),
+        GOVERNANCE_ALERT_SUBJECT,
+        body,
+    )
+    return f"Governance alert sent to {recipient.strip()}"
